@@ -1,0 +1,148 @@
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[project]
+name = "stjepa"
+version = "0.0.0"
+description = "Spatial transcriptomics foundation model based on LeJEPA"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Sebastian Birk"},
+    {name = "Mohammad Vali Sanian"},
+]
+maintainers = [
+    {name = "Sebastian Birk", email = "sebastian.birk@helmholtz-munich.de"},
+    {name = "Mohammad Vali Sanian", email = "mohammad.sanian@helsinki.fi"},
+]
+
+# ---------------------------------------------------------------------------
+# Core dependencies — required for training
+# ---------------------------------------------------------------------------
+dependencies = [
+    # Deep learning
+    "torch>=2.1",
+    "numpy>=1.24",
+    # Data loading / experiment tracking
+    "datasets>=2.14",
+    "wandb>=0.16",
+    "pyyaml>=6.0",
+    "tqdm>=4.65",
+    # Hugging Face transformers (for distributed init util)
+    "transformers>=4.36",
+    # Single-cell biology data stack
+    "anndata>=0.10",
+    "scanpy>=1.9",
+    "scipy>=1.11",
+    "pandas>=2.0",
+    # Gene annotation (used in inference utils)
+    "pyensembl>=2.2",
+    # Misc
+    "requests>=2.31",
+    # Used in normalize_by_seurat (loess fitting); lazy-imported so the
+    # module can load without it, but needed whenever Seurat normalisation is run.
+    "scikit-misc>=0.3",
+]
+
+# ---------------------------------------------------------------------------
+# Optional dependency groups
+# ---------------------------------------------------------------------------
+[project.optional-dependencies]
+
+# Evaluation / benchmarking (not needed for training)
+eval = [
+    "scikit-learn>=1.3",
+    "scib-metrics>=0.4",
+    "matplotlib>=3.7",
+    "scvi-tools>=1.0",
+    "cellphonedb>=5.0",
+    "omnipath>=1.0",
+    "ipython>=8.0",
+]
+
+# Development tools
+dev = [
+    "pytest>=7.0",
+    "coverage>=7.0",
+    "pre-commit>=3.0",
+    "ruff>=0.1",
+]
+
+# Documentation
+doc = [
+    "sphinx>=4",
+    "sphinx-book-theme>=1.0.0",
+    "myst-nb",
+    "sphinxcontrib-bibtex>=1.0.0",
+    "sphinx-autodoc-typehints",
+    "sphinxext-opengraph",
+    "sphinx-copybutton",
+    "docutils>=0.8,!=0.18.*,!=0.19.*",
+    "ipython>=8.0",
+    "ipykernel",
+    "pandas>=2.0",
+]
+
+# ---------------------------------------------------------------------------
+# uv configuration
+# ---------------------------------------------------------------------------
+
+# Route torch* packages exclusively to the PyTorch wheel index so that
+# packages like `requests` are never resolved from there (the PyTorch index
+# ships an old requests==2.28.1 which would otherwise shadow PyPI).
+# Adjust the cu* suffix to match your cluster's CUDA driver:
+#   cu118  →  CUDA 11.8
+#   cu121  →  CUDA 12.1
+#   cu124  →  CUDA 12.4
+#   cu128  →  CUDA 12.8 (H100 / A100 recommended)
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true   # only consulted for packages listed in [tool.uv.sources]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+torchaudio = [{ index = "pytorch-cu128" }]
+
+# ---------------------------------------------------------------------------
+# Tool configuration
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/stjepa"]
+
+[tool.coverage.run]
+source = ["stjepa"]
+omit = ["**/test_*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+addopts = ["--import-mode=importlib"]
+
+[tool.ruff]
+line-length = 120
+src = ["src"]
+extend-include = ["*.ipynb"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "D", "B", "TID", "C4", "BLE", "UP", "RUF100"]
+ignore = [
+    "E501", "E731", "E741",
+    "D100", "D104", "D105", "D107",
+    "D203", "D213", "D400", "D401",
+    "B008",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"docs/*" = ["I"]
+"tests/*" = ["D"]
+"*/__init__.py" = ["F401"]
