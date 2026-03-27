@@ -244,26 +244,13 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
         #print(masks)
         #print(x)
 
-        if DEBUG:
-            zero_rows = (x.abs().sum(dim=-1) == 0)   # (B, S)
-            percentage_zero_rows = zero_rows.float().mean()
-            print("Fraction of preblock X all-zero rows:", percentage_zero_rows)
-
         # Run forward prop and store embeddings for each specified layer
         out: dict[int, torch.Tensor] = {}
-        if DEBUG:
-            valid_mask = x.ne(0).any(dim=-1)
         for i, blk in enumerate(self.blocks, start=1):
             x = blk(x, masks=attn)
             if i == len(self.blocks) and (self.norm is not None):
                 # Apply norm only for last layer as in training
-                x = self.norm(x)
-                if DEBUG:
-                    x = x * valid_mask.unsqueeze(-1)
-                    zero_rows = (x.abs().sum(dim=-1) == 0)   # (B, S)
-
-                    percentage_zero_rows = zero_rows.float().mean()
-                    print("Fraction of afterblock X all-zero rows:", percentage_zero_rows)                
+                x = self.norm(x)             
             if i in layers:
                 # Remove special tokens from output
                 out[i] = x[:, self.n_special_tokens:, :]
@@ -1112,18 +1099,6 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
 
         # Add segment, positional, and gene embeddings to value embeddings
         x = seg_emb + pos_emb + token_emb + value_emb # [B, L, D]
-
-        if DEBUG:
-
-            def zero_row_percentage(t):
-                # t: (B, L, D)
-                zero_rows = t.eq(0).all(dim=-1)   # (B, L)
-                return zero_rows.float().mean()   # scalar        
-
-            print("seg_emb zero rows:", zero_row_percentage(seg_emb))
-            print("pos_emb zero rows:", zero_row_percentage(pos_emb))
-            print("token_emb zero rows:", zero_row_percentage(token_emb))
-            print("value_emb zero rows:", zero_row_percentage(value_emb))
 
         # Remove special token contents
         #if ignore_spc_tokens:

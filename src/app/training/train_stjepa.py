@@ -82,9 +82,6 @@ def _pool(x: torch.Tensor, mode: str, n_special_tokens: int) -> torch.Tensor:
         ``'mean'``: mean-pool over all L positions (gene tokens +
         special tokens).  Works regardless of whether special tokens are
         present.
-        ``'cls'``: take the first position (index 0), which is expected
-        to be the CLS / first special token.  Requires
-        ``always_include_special=True`` in the collator.
         ``'mean_gene'``: mean-pool over gene-token positions only
         (i.e., positions ``n_special_tokens:``).
     n_special_tokens:
@@ -96,9 +93,7 @@ def _pool(x: torch.Tensor, mode: str, n_special_tokens: int) -> torch.Tensor:
     pooled:
         Shape ``(B, D)``.
     """
-    if mode == "cls":
-        return x[:, 0, :]
-    elif mode == "mean_gene":
+    if mode == "mean_gene":
         return x[:, n_special_tokens:, :].mean(dim=1)
     else:  # 'mean'
         return x.mean(dim=1)
@@ -246,14 +241,6 @@ def train_stjepa(
     with open(token_dict_folder_path, "rb") as fh:
         token_dict = pickle.load(fh)
     vocab_size = len(token_dict)
-
-    # Special-token list
-    if tokenizer_type == "cell_neighborhood":
-        if add_cls:
-            special_tokens = ["cls_0", "cls_1"] + special_tokens
-    elif tokenizer_type == "cell_graph":
-        if add_cls:
-            special_tokens = [f"cls_{i}" for i in range(n_segments)] + special_tokens
 
     n_special_tokens = len(special_tokens)
     seq_len = seq_len_cell + seq_len_neighborhood + n_special_tokens

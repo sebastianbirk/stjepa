@@ -568,92 +568,13 @@ class CellGraphDataset(CellBaseDataset):
         return item_dict
 
 
-class CellNeighborhoodDataset(CellBaseDataset):
-    def __init__(self,
-                 **base_dataset_kwargs
-                 ):
-        """
-        Torch CellNeighborhoodDataset class.
-
-        Parameters
-        -----------
-        **base_dataset_kwargs:
-            Keyword arguments for the initialization of the
-            CellBaseDataset.
-        """
-        super().__init__(**base_dataset_kwargs)
-
-    def __getitem__(self,
-                    item: int
-                    ) -> dict:
-        item_dict = {}
-
-        # Retrieve Hugging Face item once
-        item = self.dataset[item]
-        
-        # Get (sampled) gene tokens, positions, segments, and values
-        gene_tokens_cell, \
-        values_cell, \
-        rel_x_coords_cell, \
-        rel_y_coords_cell = self._get_segment_seq(
-            item=item,
-            segment=1, # cell seg
-            segment_seq_len=self.seq_len_cell)
-        gene_tokens_neigh, \
-        values_neigh, \
-        rel_x_coords_neigh, \
-        rel_y_coords_neigh = self._get_segment_seq(
-            item=item,
-            segment=2, # neigh seg
-            segment_seq_len=self.seq_len_neighborhood)
-        item_dict['tokens'] = torch.cat(
-            [gene_tokens_cell, gene_tokens_neigh], dim=0)
-
-        segments_cell = torch.where(
-            gene_tokens_cell != 0, torch.tensor(1), torch.tensor(0)).to(
-                dtype=torch.long)
-        segments_neigh = torch.where(
-            gene_tokens_neigh != 0, torch.tensor(2), torch.tensor(0)).to(
-                dtype=torch.long)
-        item_dict['segments'] = torch.cat(
-            [segments_cell, segments_neigh], dim=0)
-        if self.cell_pos_enc == 'coord':
-            item_dict['rel_x_coords'] = torch.cat(
-                [rel_x_coords_cell, rel_x_coords_neigh], dim=0)
-            item_dict['rel_y_coords'] = torch.cat(
-                [rel_y_coords_cell, rel_y_coords_neigh], dim=0)
-
-        if self.gt_type != 'count':
-            item_dict['positions'] = torch.cat([
-                torch.arange(1, gene_tokens_cell.size(0) + 1),
-                torch.arange(1, gene_tokens_neigh.size(0) + 1)])
-            item_dict['positions'] = item_dict['positions'] * (
-                item_dict['tokens'] != 0).to(positions.dtype)
-
-        if self.gt_type != 'rank':
-            item_dict['values'] = torch.cat([values_cell, values_neigh], dim=0)
-
-        # Add special tokens
-        item_dict = self._add_special_seq(item=item,
-                                          item_dict=item_dict)
-
-        # Add cell ID
-        if self.include_cell_id:
-            item_dict['cell_id'] = item['cell_id']
-        
-        return item_dict
-
-
-def init_cell_dataset(tokenizer_type: Literal['cell_graph',
-                                              'cell_neigh'],
+def init_cell_dataset(tokenizer_type: Literal['cell_graph'],
                       **cell_dataset_kwargs,
-                      ) -> CellGraphDataset | CellNeighborhoodDataset:
+                      ) -> CellGraphDataset:
     """
     Initialize CellDataset based on tokenizer type.
     """
     if tokenizer_type == 'cell_graph':
         cell_dataset = CellGraphDataset(**cell_dataset_kwargs)
-    elif tokenizer_type  == 'cell_neigh':
-        cell_dataset = CellNeighborhoodDataset(**cell_dataset_kwargs)
 
     return cell_dataset
