@@ -22,7 +22,7 @@ from pyensembl import EnsemblRelease
 from scipy.sparse import issparse
 
 from app.utils import init_model, load_checkpoint
-from stjepa.datasets.cell_datasets import CellBaseDataset, init_cell_dataset
+from stjepa.datasets.cell_datasets import CellDataset
 from stjepa.datasets.dataloaders import init_dataloader_and_sampler
 from stjepa.masks.inference_collator import InferenceCollator
 from stjepa.tokenizers import cell_tokenizers
@@ -50,7 +50,7 @@ logger = logging.getLogger()
 
 @torch.inference_mode()
 def infer(args: dict,
-          dataset: CellBaseDataset,
+          dataset: CellDataset,
           load_folder_path: str,
           dataset_ids: list | None = None,
           obs_cols: list | None = None,
@@ -135,7 +135,6 @@ def infer(args: dict,
         torch.cuda.set_device(device)
 
     # Load params from config file
-    add_cls = args['meta']['add_cls']
     gt_type = args['meta']['gt_type']
     count_encoding = args['meta'].get('count_encoding', 'value_bins')
     n_value_bins = args['meta'].get('n_value_bins', 100)
@@ -145,10 +144,9 @@ def infer(args: dict,
     num_heads = args['meta'].get('num_heads', 8)
     mlp_ratio = args['meta'].get('mlp_ratio', 4.0)
     pos_learnable = args['meta'].get('pos_learnable', False)
-    special_tokens = args['meta']['special_tokens']
+    special_tokens = args['meta'].get('special_tokens', [])
     use_bfloat16 = args['meta']['use_bfloat16']
     use_flash_attention = args['meta']['use_flash_attention']
-    use_layer_norm = args['meta']['use_layer_norm']
     mlp_bias = args['meta'].get('mlp_bias', True)
 
     dataset_name = args['data']['dataset_name']
@@ -164,7 +162,6 @@ def infer(args: dict,
     MAX_OCC = args['data']['n_segments'] - 1
 
     sep_gene_tokens_neb = args['data'].get('sep_gene_tokens_neb', False)
-    nz_spc = args['data'].get('nz_spc', False)
     mega_batch_mult_max = args['data'].get('mega_batch_mult_max', 1000)
 
     # ST-JEPA config section
@@ -189,16 +186,6 @@ def infer(args: dict,
     else:
         agg_excluded_tokens = None
 
-    # Define tokenizer-specific params
-    if tokenizer_type == 'cell_neighborhood':
-        if add_cls:
-            special_tokens = ['cls_0', 'cls_1'] + special_tokens
-    elif tokenizer_type == 'cell_graph':
-        if add_cls:
-            special_tokens = [
-                f'cls_{i}' for i in range(n_segments)] + special_tokens
-
-    # Get token sequence length and number of special tokens
     n_special_tokens = len(special_tokens)
     seq_len = seq_len_cell + seq_len_neighborhood + n_special_tokens
 
@@ -232,10 +219,8 @@ def infer(args: dict,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         use_flash_attention=use_flash_attention,
-        use_layer_norm=use_layer_norm,
         sep_gene_tokens_neb=sep_gene_tokens_neb,
         pos_learnable=pos_learnable,
-        nz_spc=nz_spc,
         mlp_bias=mlp_bias,
         proj_dim=stjepa_cfg.get('proj_dim', 256),
         proj_hidden_dim=stjepa_cfg.get('proj_hidden_dim'),
@@ -248,25 +233,23 @@ def infer(args: dict,
     inference_collator = InferenceCollator()
 
     # Initialize dataset and dataloader
-    cell_dataset = init_cell_dataset(
+    cell_dataset = CellDataset(
         dataset=dataset,
         vocab_size=vocab_size,
         seq_len_cell=seq_len_cell,
         seq_len_neighborhood=seq_len_neighborhood,
-        tokenizer_type=tokenizer_type,
         gt_type=gt_type,
         cell_pos_enc=cell_pos_enc,
         special_tokens=special_tokens,
         sampling_strategy=None,
         n_nonzero_tokens_list=[],
         include_cell_id=True,
-        sep_gene_tokens_neb=sep_gene_tokens_neb,
-        nz_spc=nz_spc)
+        sep_gene_tokens_neb=sep_gene_tokens_neb)
 
     loader, _ = init_dataloader_and_sampler(
         cell_dataset=cell_dataset,
         batch_size=batch_size,
-        distributed=False,
+        use_length_grouped_sampler=False,
         world_size=1,
         rank=0,
         collate_fn=inference_collator,

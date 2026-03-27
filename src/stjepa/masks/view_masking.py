@@ -11,17 +11,15 @@ Design rationale
 ----------------
 Spatial transcriptomics tokens are stored as a flat integer sequence:
 
-    [spc_0, …, spc_{S-1}, g_0, g_1, …, g_{N-1}]
+    [g_0, g_1, …, g_{N-1}]
 
-where ``S = n_special_tokens`` (assay, batch, CLS, …), ``g_i = 0`` for
-absent genes (padding), and ``g_i > 0`` for expressed genes.
+where ``g_i = 0`` for absent genes (padding) and ``g_i > 0`` for expressed
+genes.
 
 For each cell we:
   1. Collect the global indices of non-zero gene tokens.
   2. Sample V random fractions (each drawn uniformly in
      [min_view_ratio, max_view_ratio]) of those indices.
-  3. Optionally prepend the special token indices to every view so that
-     meta-information (assay, batch) and CLS embeddings are always present.
 
 All views within a batch are then trimmed to the minimum view length to
 allow batch-stacking into a tensor of shape (V, B, min_view_len).
@@ -38,30 +36,19 @@ class ViewMaskCollator:
     ----------
     V:
         Number of views to sample per cell.
-    n_special_tokens:
-        Number of special tokens at the beginning of each token sequence
-        (e.g. CLS, assay, batch tokens).  These positions are treated as
-        off-limits for gene-view sampling but are optionally prepended to
-        every view via ``always_include_special``.
     min_view_ratio:
         Minimum fraction of a cell's non-padded gene tokens to include in
         a single view.  Must be in (0, 1].
     max_view_ratio:
         Maximum fraction of a cell's non-padded gene tokens to include in
         a single view.  Must be in (0, 1] and >= min_view_ratio.
-    always_include_special:
-        If ``True`` (default), special token indices are prepended to every
-        view mask so that the encoder always receives meta-information and
-        CLS embeddings regardless of the gene subset chosen.
     """
 
     def __init__(
         self,
         V: int,
-        n_special_tokens: int,
         min_view_ratio: float = 0.2,
         max_view_ratio: float = 0.8,
-        always_include_special: bool = True,
     ):
         assert 0 < min_view_ratio <= max_view_ratio <= 1.0, (
             "Require 0 < min_view_ratio <= max_view_ratio <= 1.0, "
@@ -69,45 +56,43 @@ class ViewMaskCollator:
         assert V >= 1, f"Need at least 1 view, got V={V}."
 
         self.V = V
-        self.n_special_tokens = n_special_tokens
         self.min_view_ratio = min_view_ratio
         self.max_view_ratio = max_view_ratio
-        self.always_include_special = always_include_special
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _sample_views(self, tokens: torch.Tensor) -> list[torch.Tensor]:
+    def _sample_views(
+        self,
+        tokens: torch.Tensor,
+    ) -> list[torch.Tensor]:
         """
         Sample V random gene-token views for a single cell.
 
         Parameters
         ----------
         tokens:
-            1-D token sequence of shape (N,).  The first
-            ``n_special_tokens`` entries are special tokens; the rest are
-            gene tokens (zero where the gene is absent / padded).
+            1-D token sequence of shape (N,).  Gene tokens are zero
+            where the gene is absent / padded.
 
         Returns
         -------
         views:
             List of V 1-D long tensors, each containing the *global*
             token indices (into the full sequence of length N) for that
-            view.  Special token indices are prepended when
-            ``always_include_special=True``.
+            view.
         """
         # Identify non-padded gene token positions (global indices)
-        gene_part = tokens[self.n_special_tokens:]        # [N - S]
-        nz_local = (gene_part != 0).nonzero(as_tuple=False).squeeze(-1)
-        nz_global = nz_local + self.n_special_tokens     # [K]
+        nz_global = (tokens != 0).nonzero(as_tuple=False).squeeze(-1)
         K = nz_global.numel()
 
         if K == 0:
             # Degenerate case: all genes are zero (fully padded cell).
-            # Return views containing only special tokens (or empty).
-            spc_idx = torch.arange(self.n_special_tokens, dtype=torch.long)
-            return [spc_idx.clone() for _ in range(self.V)]
+            # Return a single-element view with the first position
+            # to avoid empty tensors downstream.
+            fallback = torch.tensor([0], dtype=torch.long)
+            return [fallback.clone() for _ in range(self.V)]
 
         views: list[torch.Tensor] = []
         for _ in range(self.V):
@@ -120,14 +105,7 @@ class ViewMaskCollator:
             n_keep = max(1, round(K * ratio))
             # Random permutation and selection
             perm = torch.randperm(K)[:n_keep]
-            view_gene_idx = nz_global[perm]              # [n_keep]
-
-            if self.always_include_special and self.n_special_tokens > 0:
-                spc_idx = torch.arange(
-                    self.n_special_tokens, dtype=torch.long)
-                view_idx = torch.cat([spc_idx, view_gene_idx])
-            else:
-                view_idx = view_gene_idx
+            view_idx = nz_global[perm]
 
             views.append(view_idx)
 

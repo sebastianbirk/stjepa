@@ -7,7 +7,7 @@ import torch
 from tqdm import tqdm
 
 from app.utils import init_model, load_checkpoint
-from stjepa.datasets.cell_datasets import CellBaseDataset
+from stjepa.datasets.cell_datasets import CellDataset
 from stjepa.datasets.dataloaders import init_dataloader_and_sampler
 from stjepa.models.modules import ClassificationModel
 
@@ -17,7 +17,7 @@ _GLOBAL_SEED = 0
 
 @torch.no_grad()
 def finetune(args: dict,
-             dataset: CellBaseDataset,
+             dataset: CellDataset,
              load_folder_path: str,
              dataset_ids: list | None = None,
              obs_cols: list | None = None,
@@ -113,7 +113,6 @@ def finetune(args: dict,
     else:
         sep_gene_tokens_neb = False
 
-    add_cls = args['meta']['add_cls']
     gt_type = args['meta']['gt_type']
     count_encoding = args['meta']['count_encoding']
     n_value_bins = args['meta']['n_value_bins']
@@ -137,10 +136,9 @@ def finetune(args: dict,
         loss_fn_type = args['meta']['loss_fn_type']
     else:
         loss_fn_type = 'l1'
-    special_tokens = args['meta']['special_tokens']
+    special_tokens = args['meta'].get('special_tokens', [])
     use_bfloat16 = args['meta']['use_bfloat16']
     use_flash_attention = args['meta']['use_flash_attention']
-    use_layer_norm = args['meta']['use_layer_norm']
 
     n_contexts = args['mask']['n_contexts']
     n_targets = args['mask']['n_targets']
@@ -196,16 +194,6 @@ def finetune(args: dict,
         1 for key in token_dict if "cls" in key) + sum(
         1 for key in token_dict if "spt" in key)
 
-    # Define tokenizer-specific params
-    if tokenizer_type == 'cell_neighborhood':
-        if add_cls:
-            special_tokens = ['cls_0', 'cls_1'] + special_tokens  
-    elif tokenizer_type == 'cell_graph':
-        if add_cls:
-            special_tokens = [
-                f'cls_{i}' for i in range(n_segments)] + special_tokens
-
-    # Get token sequence length and number of special tokens
     n_special_tokens = len(special_tokens)
     seq_len = seq_len_cell + seq_len_neighborhood + n_special_tokens
 
@@ -249,21 +237,16 @@ def finetune(args: dict,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         use_flash_attention=use_flash_attention,
-        use_layer_norm=use_layer_norm,
         sep_gene_tokens_neb=sep_gene_tokens_neb)
 
-    if api_version != 'v3':
-        return_layer_emb_fn = target_encoder.return_layer_emb
-    else:
-        return_layer_emb_fn = target_encoder.backbone.return_layer_emb
+    return_layer_emb_fn = target_encoder.backbone.return_layer_emb
 
     # Initialize dataset, dataloader and sampler
-    cell_dataset = init_cell_dataset(
+    cell_dataset = CellDataset(
         dataset=dataset,
         vocab_size=vocab_size,
         seq_len_cell=seq_len_cell,
         seq_len_neighborhood=seq_len_neighborhood,
-        tokenizer_type=tokenizer_type,
         gt_type=gt_type,
         cell_pos_enc=cell_pos_enc,
         special_tokens=special_tokens,
@@ -275,7 +258,7 @@ def finetune(args: dict,
     loader, sampler = init_dataloader_and_sampler(
         cell_dataset=cell_dataset,
         batch_size=batch_size,
-        distributed=True,
+        use_length_grouped_sampler=True,
         world_size=world_size,
         rank=rank,
         collate_fn=mask_collator,

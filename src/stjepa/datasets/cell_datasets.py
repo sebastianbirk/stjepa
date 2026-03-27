@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 
-class CellBaseDataset(Dataset):
+class CellDataset(Dataset):
     def __init__(self,
                  gt_type: Literal['rank', 'counts', 'combined'],
                  cell_pos_enc: Literal['segment', 'coord'],
@@ -15,7 +15,7 @@ class CellBaseDataset(Dataset):
                  vocab_size: int,
                  seq_len_cell: int,
                  seq_len_neighborhood: int,
-                 special_tokens: list[str] = [],
+                 adversarial_labels: list[str] | None = None,
                  sampling_strategy: Literal['norm_value_rank_sampling',
                                             'norm_value_rank_sampling_rep',
                                             'rand_sampling',
@@ -23,10 +23,9 @@ class CellBaseDataset(Dataset):
                  n_nonzero_tokens_list: list[int] | None = None,
                  include_cell_id: bool = False,
                  sep_gene_tokens_neb: bool = False,
-                 nz_spc: bool = True,
                  ):
         """
-        Torch CellBaseDataset class.
+        Torch dataset for cell-graph tokenized spatial transcriptomics data.
 
         Parameters
         -----------
@@ -42,38 +41,30 @@ class CellBaseDataset(Dataset):
             Sequence length of the index cell (number of gene tokens).
         seq_len_neighborhood:
             Sequence length of the neighborhood (number of gene tokens).
-        special_tokens:
-            Special tokens to be included in the sequence.
+        adversarial_labels:
+            List of HuggingFace dataset column names to include as
+            adversarial classification targets (e.g.
+            ``['batch_value', 'assay_value']``).  Each column should
+            contain a single integer label per cell.
         sampling_strategy:
             Token sampling strategy.
         n_nonzero_tokens_list:
             List of number of nonzero tokens.
         include_cell_id:
-            If `True`, return cell ID string in getitem().
+            If ``True``, return cell ID string in ``__getitem__``.
         sep_gene_tokens_neb:
-            If `True`, use separate tokens for genes in neighborhood vs
+            If ``True``, use separate tokens for genes in neighborhood vs
             index cell.
         """
         if gt_type not in ['rank', 'counts', 'combined']:
             raise ValueError(f'Invalid "gt_type": {gt_type}.')
         if cell_pos_enc not in ['segment', 'coord']:
             raise ValueError(f'Invalid "cell_pos_enc": {cell_pos_enc}.')
-        
+
         self.gt_type = gt_type
         self.cell_pos_enc = cell_pos_enc
 
-        exclude_cols = [
-            #'gene_panel_value',
-            #'assay_value',
-            'species_value',
-            #'tissue_value'
-            ]
-        #if self.cell_pos_enc != 'coord':
-        #    exclude_cols += [
-        #        'rel_x_coord',
-        #        'rel_y_coord']
-        #if not include_cell_id:
-        #    exclude_cols += ['cell_id']
+        exclude_cols = ['species_value']
         for col in exclude_cols:
             if col in dataset.features.keys():
                 dataset = dataset.remove_columns(col)
@@ -83,11 +74,7 @@ class CellBaseDataset(Dataset):
         self.vocab_size = vocab_size
         self.seq_len_cell = seq_len_cell
         self.seq_len_neighborhood = seq_len_neighborhood
-        self.special_tokens = special_tokens
-        self.n_special_tokens = len(special_tokens)
-        self.seq_len = (seq_len_cell +
-                        seq_len_neighborhood +
-                        self.n_special_tokens)
+        self.seq_len = seq_len_cell + seq_len_neighborhood
         self.n_segments = (seq_len_cell + seq_len_neighborhood) / seq_len_cell
         self.sampling_strategy = sampling_strategy
         if n_nonzero_tokens_list:
@@ -96,92 +83,10 @@ class CellBaseDataset(Dataset):
             self.n_nz_tokens = list(self.dataset['n_nonzero_tokens'])
         self.include_cell_id = include_cell_id
         self.sep_gene_tokens_neb = sep_gene_tokens_neb
-        self.nz_spc = nz_spc
+        self.adversarial_labels = adversarial_labels or []
 
     def __len__(self) -> int:
         return self.len
-
-    def _add_special_seq(self,
-                         item: int,
-                         item_dict: dict,
-                         ) -> dict:
-        """
-        Add special tokens to sequence and update positions, segments,
-        and values.
-
-        Parameters
-        -----------
-        item:
-            Index of the cell in the Hugging Face dataset.
-        item_dict:
-            All attributes of the cell in the Hugging Face dataset,
-            including positions, segments, tokens and values.
-
-        Returns
-        -----------
-        item_dict:
-            All attributes of the cell in the Hugging Face dataset with
-            special tokens considered at sequence start.
-        """
-        for spc_tk in self.special_tokens:
-            if self.gt_type != 'rank':
-                item_dict['tokens'] = torch.cat(
-                    [item[f'{spc_tk}_token'],
-                    item_dict['tokens']])
-            else:
-                if self.vocab_size == 2785:
-                    spv_idx_subtract = torch.tensor([1674]) # mus musculus token dict
-                else:
-                    spv_idx_subtract = torch.tensor([21957]) # homo sapiens token dict
-                item_dict['tokens'] = torch.cat(
-                    [item[f'{spc_tk}_value'] + spv_idx_subtract, # see tokenizers module
-                    item_dict['tokens']])
-
-            if self.gt_type != 'rank':
-                item_dict['values'] = torch.cat(
-                    [item[f'{spc_tk}_value'],
-                     item_dict['values']])
-            
-        if self.gt_type != 'counts':
-            if self.nz_spc:
-                # Add special token positions
-                item_dict['positions'] = torch.cat(
-                    [torch.arange(
-                        1,
-                        self.n_special_tokens + 1,
-                        dtype=torch.long),
-                    item_dict['positions']])
-            else:
-                # Add special token positions
-                item_dict['positions'] = torch.cat(
-                    [torch.zeros(self.n_special_tokens, dtype=torch.long),
-                    item_dict['positions']])
-
-        # Add special token segments
-        if self.nz_spc:
-            item_dict['segments'] = torch.cat(
-                [torch.arange(
-                    1,
-                    self.n_special_tokens + 1,
-                    dtype=torch.long),
-                item_dict['segments']])
-        else:
-            item_dict['segments'] = torch.cat(
-                [torch.zeros(self.n_special_tokens, dtype=torch.long),
-                item_dict['segments']])
-
-        # Add special token coords
-        if self.cell_pos_enc == 'coord':
-            item_dict['rel_x_coords'] = torch.cat(
-                [torch.full((self.n_special_tokens,),
-                 float('-inf'), dtype=torch.float),
-                 item_dict['rel_x_coords']])   
-            item_dict['rel_y_coords'] = torch.cat(
-                [torch.full((self.n_special_tokens,),
-                 float('-inf'), dtype=torch.float),
-                 item_dict['rel_y_coords']])
-
-        return item_dict
 
     def _sample_seq(self,
                     tokens: list[int],
@@ -206,10 +111,10 @@ class CellBaseDataset(Dataset):
         rel_y_coords:
             List of relative y coordinates.
         n_nz_tokens:
-            Number of nonzero tokens in `tokens`.
+            Number of nonzero tokens in ``tokens``.
         size:
             Size of the sampled subset.
-            
+
         Returns
         --------
         sampled_tokens:
@@ -218,16 +123,6 @@ class CellBaseDataset(Dataset):
             List of (corresponding) sampled values.
         """
         if 'norm_value_rank_sampling' in self.sampling_strategy:
-            # Calculate weights based on rank and number of nonzero
-            # tokens:
-            # the higher the rank, the higher the weight
-            # seq = [4, 1, 3, 2, 5, 0, 0, 0]
-            # n_nz_tokens = 5  
-            # sum_rank = 5 * (5 + 1) / 2.0 = 15.0
-            # weights = [(n_nz_tokens - i)/sum_rank for i in range(
-            #     n_nz_tokens)] 
-            # = [0.333, 0.266, 0.2, 0.133, 0.066]
-            # np.sum(weights) = 1.0
             sum_rank = (n_nz_tokens * (n_nz_tokens + 1) / 2.0) + 1e-9
             weights = [(n_nz_tokens - i)/sum_rank for i in range(n_nz_tokens)]
             assert np.isclose(np.sum(weights), 1.0)
@@ -235,26 +130,24 @@ class CellBaseDataset(Dataset):
             weights = np.ones(n_nz_tokens) / n_nz_tokens
         else:
             raise ValueError(f"'{self.sampling_strategy}' is invalid.")
-            
-        # Sample token indices based on weights
+
         sampled_indices = np.random.choice(
             np.arange(n_nz_tokens),
             size=min(size, n_nz_tokens),
             p=weights,
             replace=(True if 'rep' in self.sampling_strategy else False))
-            
-        # Sort sampled indices to preserve rank order
+
         sampled_indices = np.sort(sampled_indices)
         sampled_tokens = [tokens[i] for i in sampled_indices]
         if values is not None:
             sampled_values = [values[i] for i in sampled_indices]
         else:
             sampled_values = None
-        if rel_x_coords is not None: # the coordinates are all the same so sampling is just for length
+        if rel_x_coords is not None:
             sampled_rel_x_coords = rel_x_coords[:len(sampled_indices)]
         else:
             sampled_rel_x_coords = None
-        if rel_y_coords is not None: # the coordinates are all the same so sampling is just for length
+        if rel_y_coords is not None:
             sampled_rel_y_coords = rel_y_coords[:len(sampled_indices)]
         else:
             sampled_rel_y_coords = None
@@ -275,8 +168,8 @@ class CellBaseDataset(Dataset):
             sampled_values,
             sampled_rel_x_coords,
             sampled_rel_y_coords)
-         
-    def _get_segment_seq(self, 
+
+    def _get_segment_seq(self,
                          item: int,
                          segment: int,
                          segment_seq_len: int,
@@ -301,14 +194,6 @@ class CellBaseDataset(Dataset):
             segment_values:
                 List of values for a given segment.
             """
-            # TODO: Fix tokenization index after removal of 100 <cls> tokens
-            #seg_tokens = torch.where(
-            #    item['seg_tokens'] != 0,
-            #    item['seg_tokens'] - 104,
-            #    item['seg_tokens'])
-
-            # Only keep gene tokens, values, and coords of specified
-            # segment
             segment_start_idx = int((segment - 1) * self.seq_len_cell)
             segment_end_idx = int(segment * self.seq_len_cell)
             segment_tokens = item['gene_tokens'][
@@ -328,26 +213,19 @@ class CellBaseDataset(Dataset):
                 segment_rel_y_coords = None
 
             if segment != 1 and self.sep_gene_tokens_neb:
-                # Create new tokens for neighbor genes
                 segment_token_nz_mask = segment_tokens.ne(0)
                 segment_tokens[segment_token_nz_mask] += self.vocab_size
 
-            # Validate that segment length is specified correctly
             if (self.sampling_strategy is not None and 'rep' in
             self.sampling_strategy):
                 pass
             else:
                 if segment_tokens.size(0) < segment_seq_len:
-                    torch.set_printoptions(threshold=float('inf'))
-                    print(segment_tokens.size(0))
-                    print(item['seg_tokens'])
                     raise ValueError(
                         'Sequence length for a given segment cannot be larger '
                         'than segment size when not sampling with replacement.'
                         )
 
-            # If no sampling strategy is specified, use all tokens up to
-            # specified length
             if self.sampling_strategy is None:
                 segment_tokens = segment_tokens[:segment_seq_len]
                 if self.gt_type != 'rank':
@@ -357,8 +235,6 @@ class CellBaseDataset(Dataset):
                         :segment_seq_len]
                     segment_rel_y_coords = segment_rel_y_coords[
                         :segment_seq_len]
-            # Otherwise, sample a subset of tokens based on the sampling
-            # strategy
             else:
                 segment_n_nz_tokens = int(
                     torch.count_nonzero(segment_tokens))
@@ -372,28 +248,12 @@ class CellBaseDataset(Dataset):
                     rel_x_coords=segment_rel_x_coords,
                     rel_y_coords=segment_rel_y_coords,
                     n_nz_tokens=segment_n_nz_tokens,
-                    size=segment_seq_len)       
-                    
+                    size=segment_seq_len)
+
             return (segment_tokens,
                     segment_values,
                     segment_rel_x_coords,
                     segment_rel_y_coords)
-
-
-class CellGraphDataset(CellBaseDataset):
-    def __init__(self,
-                 **base_dataset_kwargs,
-                 ):
-        """
-        Torch CellGraphDataset class.
-
-        Parameters
-        -----------
-        **base_dataset_kwargs:
-            Keyword arguments for the initialization of the 
-            CellBaseDataset.
-        """
-        super().__init__(**base_dataset_kwargs)
 
     def __getitem__(self,
                     item: int,
@@ -402,12 +262,6 @@ class CellGraphDataset(CellBaseDataset):
 
         # Retrieve Hugging Face item once
         item = self.dataset[item]
-
-        # TODO: add special tokens from token dict directly (1 value per row)
-        item['tissue_token'] = torch.tensor([103])
-        item['assay_token'] = torch.tensor([104])
-        item['gene_panel_token'] = torch.tensor([105])
-        item['batch_token'] = torch.tensor([106])
 
         # Expand spatial coordinates (TODO: if statement to support old API)
         if 'rel_x_coord' in item.keys():
@@ -422,7 +276,6 @@ class CellGraphDataset(CellBaseDataset):
             seg_tokens = torch.arange(1, self.n_segments + 1)
             seg_tokens = torch.repeat_interleave(
                 seg_tokens, self.seq_len_cell)
-            # Mask out positions where gene_tokens == 0
             seg_tokens = seg_tokens * (item['gene_tokens'] != 0).long()
             item['seg_tokens'] = seg_tokens
 
@@ -433,14 +286,14 @@ class CellGraphDataset(CellBaseDataset):
         item_dict['rel_x_coords'], \
         item_dict['rel_y_coords'] = self._get_segment_seq(
             item=item,
-            segment=1, # index cell segment
+            segment=1,
             segment_seq_len=self.seq_len_cell)
 
         if self.gt_type == 'rank':
             del(item_dict['values'])
 
         segment_token_zero_mask = item_dict['tokens'].eq(0)
-            
+
         if self.gt_type != 'counts':
             item_dict['positions'] = torch.arange(
                 1, item_dict['tokens'].size(0) + 1, dtype=torch.long)
@@ -461,14 +314,8 @@ class CellGraphDataset(CellBaseDataset):
 
         # Get (sampled) gene tokens, positions, segments and values for
         # neighbor cell segments
-        # TODO: Fix tokenization index after removal of 100 <cls> tokens
-        #seg_tokens = torch.where(
-        #    item['seg_tokens'] != 0,
-        #    item['seg_tokens'] - 104,
-        #    item['seg_tokens'])
-
         for segment in torch.unique(item['seg_tokens']):
-            if segment.item() > 1: # neighbor cell segments
+            if segment.item() > 1:
                 segment_tokens, \
                 segment_values, \
                 segment_rel_x_coords, \
@@ -511,7 +358,6 @@ class CellGraphDataset(CellBaseDataset):
         target_len = self.seq_len_cell + self.seq_len_neighborhood
 
         if current_len > target_len:
-            # Truncate tokens
             item_dict['tokens'] = item_dict['tokens'][:target_len]
             item_dict['segments'] = item_dict['segments'][:target_len]
             if self.gt_type != 'counts':
@@ -524,7 +370,6 @@ class CellGraphDataset(CellBaseDataset):
                 item_dict['rel_y_coords'] = item_dict['rel_y_coords'][
                     :target_len]
         elif current_len < target_len:
-            # Pad tokens
             pad_len = target_len - current_len
             item_dict['tokens'] = F.pad(
                 item_dict['tokens'], (0, pad_len), value=0)
@@ -544,37 +389,20 @@ class CellGraphDataset(CellBaseDataset):
                 item_dict['rel_y_coords'] = F.pad(
                     item_dict['rel_y_coords'],
                     (0, pad_len),
-                    value=float('-inf'))                     
-
-        # Add special tokens
-        if self.n_special_tokens > 0:
-            item_dict = self._add_special_seq(item=item,
-                                              item_dict=item_dict)
+                    value=float('-inf'))
 
         # Add cell ID
         if self.include_cell_id:
             item_dict['cell_id'] = item['cell_id']
-            
-        if self.nz_spc:
-            item_dict['segments'][
-                (item_dict['segments'] != 0) & (
-                    torch.arange(len(item_dict['segments'])
-                    ) >= self.n_special_tokens)] += 1
-        #print(item_dict['tokens'])
-        #print(item_dict['values'])
-        #print(item_dict['segments'])
-        #print(item_dict['positions'])
-        
+
+        # Add adversarial labels (e.g. batch_value, assay_value, ...)
+        for label_name in self.adversarial_labels:
+            val = item[label_name]
+            if isinstance(val, list):
+                item_dict[label_name] = torch.tensor(
+                    val[0], dtype=torch.long)
+            else:
+                item_dict[label_name] = torch.tensor(
+                    val, dtype=torch.long)
+
         return item_dict
-
-
-def init_cell_dataset(tokenizer_type: Literal['cell_graph'],
-                      **cell_dataset_kwargs,
-                      ) -> CellGraphDataset:
-    """
-    Initialize CellDataset based on tokenizer type.
-    """
-    if tokenizer_type == 'cell_graph':
-        cell_dataset = CellGraphDataset(**cell_dataset_kwargs)
-
-    return cell_dataset

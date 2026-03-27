@@ -22,7 +22,7 @@ from pyensembl import EnsemblRelease
 from scipy.sparse import issparse
 
 from app.utils import init_model, load_checkpoint
-from stjepa.datasets.cell_datasets import CellBaseDataset, init_cell_dataset
+from stjepa.datasets.cell_datasets import CellDataset
 from stjepa.datasets.dataloaders import init_dataloader_and_sampler
 from stjepa.masks.inference_collator import InferenceCollator
 from stjepa.tokenizers import cell_tokenizers
@@ -62,7 +62,6 @@ def embed_dataset(dataset: Dataset,
                   num_workers: int = 12,
                   include_spatial_cell_emb: bool = True,
                   return_token_embeddings: bool = False,
-                  ignore_spc_tokens: bool = True,
                   agg_type: Literal['avg',
                                     'softmax'] = 'avg',
                   ) -> dict:
@@ -90,8 +89,7 @@ def embed_dataset(dataset: Dataset,
         If `True`, also return a spatially contextualized cell embedding that
         attends to the neighborhood.
     return_token_embeddings:
-        If `True`, also return per-token embeddings for each sequence position
-        (cell and neighborhood tokens; special tokens are excluded).
+        If `True`, also return per-token embeddings for each sequence position.
 
     Returns:
     -----------
@@ -111,12 +109,10 @@ def embed_dataset(dataset: Dataset,
     with open(model_config_file_path, 'r') as file:
         model_config = yaml.safe_load(file)
 
-    # Get token sequence length and number of special tokens
-    n_special_tokens = len(model_config['meta']['special_tokens'])
+    # Get token sequence length
     seq_len = (
         model_config['data']['seq_len_cell'] +
-        model_config['data']['seq_len_neighborhood'] +
-        n_special_tokens)
+        model_config['data']['seq_len_neighborhood'])
 
     # Specify last emb layer if not defined
     if emb_layer is None:
@@ -126,9 +122,6 @@ def embed_dataset(dataset: Dataset,
     with open(token_dictionary_file_path, 'rb') as file:
         token_dict = pickle.load(file)
     vocab_size = len(token_dict)
-    #n_special_values = sum(
-    #    1 for key in token_dict if "spv" in key) # this only works now because of the dummy special values
-    n_special_values = model_config['data'].get('n_special_values', 0)
 
     if agg_excluded_genes:
         agg_excluded_tokens = [
@@ -158,9 +151,7 @@ def embed_dataset(dataset: Dataset,
         device=device,
         vocab_size=vocab_size,
         seq_len=seq_len,
-        n_special_tokens=n_special_tokens,
         n_segments=model_config['data']['n_segments'],
-        n_special_values=n_special_values,
         enc_emb_dim=model_config['meta']['enc_emb_dim'],
         enc_depth=model_config['meta']['enc_depth'],
         num_heads=model_config['meta']['num_heads'],
@@ -168,7 +159,6 @@ def embed_dataset(dataset: Dataset,
         use_flash_attention=model_config['meta']['use_flash_attention'],
         sep_gene_tokens_neb=model_config['data']['sep_gene_tokens_neb'],
         pos_learnable=model_config['meta']['pos_learnable'],
-        nz_spc=model_config['data'].get('nz_spc', False),
         mlp_bias=model_config['meta'].get('mlp_bias', True),
         proj_dim=stjepa_cfg.get('proj_dim', 256),
         proj_hidden_dim=stjepa_cfg.get('proj_hidden_dim'),
@@ -181,15 +171,13 @@ def embed_dataset(dataset: Dataset,
     inference_collator = InferenceCollator()
 
     # Create torch dataset
-    cell_dataset = init_cell_dataset(
+    cell_dataset = CellDataset(
         dataset=dataset,
         vocab_size=vocab_size,
         seq_len_cell=model_config['data']['seq_len_cell'],
         seq_len_neighborhood=model_config['data']['seq_len_neighborhood'],
-        tokenizer_type=model_config['data']['tokenizer_type'],
         gt_type=model_config['meta']['gt_type'],
         cell_pos_enc=model_config['meta']['cell_pos_enc'],
-        special_tokens=model_config['meta']['special_tokens'],
         sampling_strategy=None,
         n_nonzero_tokens_list=[],
         include_cell_id=True,
@@ -199,7 +187,7 @@ def embed_dataset(dataset: Dataset,
     loader, _ = init_dataloader_and_sampler(
         cell_dataset=cell_dataset,
         batch_size=batch_size,
-        distributed=False,
+        use_length_grouped_sampler=False,
         world_size=1,
         rank=0,
         collate_fn=inference_collator,
@@ -231,8 +219,6 @@ def embed_dataset(dataset: Dataset,
         masks_attention = masks_attention.to(device, non_blocking=True)
 
         # Aggregate gene embeddings into cell and neighborhood embeddings
-        ns_tokens = udata['tokens'][:, n_special_tokens:]
-
         # Retrieve gene embeddings from different layers
         with torch.cuda.amp.autocast(
             dtype=torch.bfloat16,
@@ -245,7 +231,6 @@ def embed_dataset(dataset: Dataset,
                 batch=udata,
                 masks_attention=masks_attention,
                 need_cell_only_context=True,
-                ignore_spc_tokens=ignore_spc_tokens,
             )
 
             c_emb = cell_only_ctx[emb_layer].cpu()
@@ -256,7 +241,7 @@ def embed_dataset(dataset: Dataset,
         
         # Create mask for index cell genes
         cell_mask = create_binary_selection_mask(
-            ns_tokens,
+            udata['tokens'],
             selection_type="agg_cell",
             excluded_tokens=agg_excluded_tokens,
             seq_len_cell=model_config['data']['seq_len_cell'],
@@ -264,7 +249,7 @@ def embed_dataset(dataset: Dataset,
 
         #torch.set_printoptions(threshold=float('inf'))
         #print('ns tokens')
-        #print(ns_tokens[0])
+        #print(udata['tokens'][0])
         #print('cell mask')
         #print(cell_mask[0])
         #raise ValueError
@@ -272,14 +257,14 @@ def embed_dataset(dataset: Dataset,
         # Create mask for neighbor cell genes
         if model_config['data']['tokenizer_type'] == 'cell_neighborhood':
             neighborhood_mask = create_binary_selection_mask(
-                ns_tokens,
+                udata['tokens'],
                 selection_type="agg_neighborhood",
                 excluded_tokens=agg_excluded_tokens,
                 seq_len_cell=model_config['data']['seq_len_cell'],
                 top_k=top_k).cpu()
         elif model_config['data']['tokenizer_type'] == 'cell_graph':
             neighborhood_mask = create_binary_selection_mask(
-                ns_tokens,
+                udata['tokens'],
                 selection_type="agg_graph",
                 excluded_tokens=agg_excluded_tokens,
                 seq_len_cell=model_config['data']['seq_len_cell'],
@@ -293,7 +278,7 @@ def embed_dataset(dataset: Dataset,
                 spatial_cell_emb = compute_mean_unmasked_emb(n_emb, cell_mask)
             neighborhood_emb = compute_mean_unmasked_emb(n_emb, neighborhood_mask)
         elif agg_type == 'softmax':
-            values = udata['values'][:, n_special_tokens:].detach().cpu()
+            values = udata['values'].detach().cpu()
             cell_values = values.masked_fill(~cell_mask, float('-inf'))
             cell_weights = torch.softmax(cell_values, dim=1)
             cell_emb = compute_softmax_weighted_mean_emb(c_emb, cell_weights)
@@ -364,7 +349,6 @@ def harmonize_tokenize_embed_pipeline(
         num_workers: int = 12,
         use_generator: bool = True,
         add_neigh_cell_ids: bool = False,
-        ignore_spc_tokens: bool = True,
         ) -> ad.AnnData:
     """
     Harmonize, tokenize and embed an AnnData object.
@@ -533,8 +517,7 @@ def harmonize_tokenize_embed_pipeline(
         top_k=top_k,
         batch_size=batch_size,
         pin_memory=pin_memory,
-        num_workers=num_workers,
-        ignore_spc_tokens=ignore_spc_tokens)
+        num_workers=num_workers)
     print(f"Embedded tokenized data.")
 
     # Add embeddings to adata
@@ -619,12 +602,10 @@ def gene_embed_dataset(dataset: Dataset,
     with open(model_config_file_path, 'r') as file:
         model_config = yaml.safe_load(file)
 
-    # Get token sequence length and number of special tokens
-    n_special_tokens = len(model_config['meta']['special_tokens'])
+    # Get token sequence length
     seq_len = (
         model_config['data']['seq_len_cell'] +
-        model_config['data']['seq_len_neighborhood'] +
-        n_special_tokens)
+        model_config['data']['seq_len_neighborhood'])
     seq_len_cell = model_config['data']['seq_len_cell']
     # Specify last emb layer if not defined
     if emb_layer is None:
@@ -634,7 +615,6 @@ def gene_embed_dataset(dataset: Dataset,
     with open(token_dictionary_file_path, 'rb') as file:
         token_dict = pickle.load(file)
     vocab_size = len(token_dict)
-    n_special_values = sum(1 for key in token_dict if "spv" in key)
 
     print('==================================================')
     print(f'STEP 2: {description}')
@@ -659,9 +639,7 @@ def gene_embed_dataset(dataset: Dataset,
         device=device,
         vocab_size=vocab_size,
         seq_len=seq_len,
-        n_special_tokens=n_special_tokens,
         n_segments=model_config['data']['n_segments'],
-        n_special_values=n_special_values,
         enc_emb_dim=model_config['meta']['enc_emb_dim'],
         enc_depth=model_config['meta']['enc_depth'],
         num_heads=model_config['meta']['num_heads'],
@@ -669,7 +647,6 @@ def gene_embed_dataset(dataset: Dataset,
         use_flash_attention=model_config['meta']['use_flash_attention'],
         sep_gene_tokens_neb=model_config['data']['sep_gene_tokens_neb'],
         pos_learnable=model_config['meta']['pos_learnable'],
-        nz_spc=model_config['data'].get('nz_spc', False),
         mlp_bias=model_config['meta'].get('mlp_bias', True),
         proj_dim=stjepa_cfg.get('proj_dim', 256),
         proj_hidden_dim=stjepa_cfg.get('proj_hidden_dim'),
@@ -682,15 +659,13 @@ def gene_embed_dataset(dataset: Dataset,
     inference_collator = InferenceCollator()
 
     # Create torch dataset
-    cell_dataset = init_cell_dataset(
+    cell_dataset = CellDataset(
         dataset=dataset,
         vocab_size=vocab_size,
         seq_len_cell=model_config['data']['seq_len_cell'],
         seq_len_neighborhood=model_config['data']['seq_len_neighborhood'],
-        tokenizer_type=model_config['data']['tokenizer_type'],
         gt_type=model_config['meta']['gt_type'],
         cell_pos_enc=model_config['meta']['cell_pos_enc'],
-        special_tokens=model_config['meta']['special_tokens'],
         sampling_strategy=None,
         n_nonzero_tokens_list=[],
         include_cell_id=True,
@@ -700,7 +675,7 @@ def gene_embed_dataset(dataset: Dataset,
     loader, _ = init_dataloader_and_sampler(
         cell_dataset=cell_dataset,
         batch_size=batch_size,
-        distributed=False,
+        use_length_grouped_sampler=False,
         world_size=1,
         rank=0,
         collate_fn=inference_collator,
@@ -739,8 +714,6 @@ def gene_embed_dataset(dataset: Dataset,
         masks_attention = masks_attention.to(device, non_blocking=True)
 
         # Aggregate gene embeddings into cell and neighborhood embeddings
-        ns_tokens = udata['tokens'][:, n_special_tokens:]
-
         # Retrieve gene embeddings from different layers
         with torch.cuda.amp.autocast(
             dtype=torch.bfloat16,
@@ -766,14 +739,14 @@ def gene_embed_dataset(dataset: Dataset,
 
             # Vectorized extraction for cell genes (first occurrence in cell segment)
             if Gc > 0:
-                ns_cell = ns_tokens[:, :seq_len_cell]  # (N, Lc) token IDs in the cell segment
-                cell_gene_ids_tensor = torch.as_tensor(cell_gene_ids, device=ns_tokens.device, dtype=ns_tokens.dtype)  # (Gc,)
+                ns_cell = udata['tokens'][:, :seq_len_cell]  # (N, Lc) token IDs in the cell segment
+                cell_gene_ids_tensor = torch.as_tensor(cell_gene_ids, device=udata['tokens'].device, dtype=udata['tokens'].dtype)  # (Gc,)
                 # Build equality mask across all cell genes and positions: True where token equals gene ID
                 eq_cell = (ns_cell.unsqueeze(1) == cell_gene_ids_tensor.view(1, -1, 1))  # (N, Gc, Lc)
                 # Presence for each gene in each sequence (1 if present)
                 cell_presence = eq_cell.any(dim=2).float()  # (N, Gc)
                 # Compute first occurrence index by assigning unmatched positions a large sentinel and taking min
-                pos_cell = torch.arange(seq_len_cell, device=ns_tokens.device).view(1, 1, -1)  # (1,1,Lc)
+                pos_cell = torch.arange(seq_len_cell, device=udata['tokens'].device).view(1, 1, -1)  # (1,1,Lc)
                 masked_pos = torch.where(eq_cell, pos_cell, torch.full_like(pos_cell, seq_len_cell))  # (N,Gc,Lc)
                 first_idx = masked_pos.min(dim=2).values  # (N, Gc), equals sentinel if absent
                 # Gather embeddings at first occurrence from both contexts; clamp handles absent sentinel safely
@@ -822,8 +795,8 @@ def gene_embed_dataset(dataset: Dataset,
 
             # Compute receptor averages for cell-neighborhood gene pairs (vectorized)
             if return_receptor_average and Gc > 0 and Gn > 0:
-                ns_neb = ns_tokens[:, seq_len_cell:]  # (N, L_neb) neighborhood segment tokens
-                neigh_gene_ids_tensor = torch.as_tensor(neighborhood_gene_ids, device=ns_tokens.device, dtype=ns_tokens.dtype)  # (Gn,)
+                ns_neb = udata['tokens'][:, seq_len_cell:]  # (N, L_neb) neighborhood segment tokens
+                neigh_gene_ids_tensor = torch.as_tensor(neighborhood_gene_ids, device=udata['tokens'].device, dtype=udata['tokens'].dtype)  # (Gn,)
                 # Equality mask across neighborhood genes
                 eq_neb = (ns_neb.unsqueeze(1) == neigh_gene_ids_tensor.view(1, -1, 1))  # (N, Gn, L_neb)
                 neigh_presence = eq_neb.any(dim=2).float()  # (N, Gn) presence per sequence/gene
@@ -859,14 +832,14 @@ def gene_embed_dataset(dataset: Dataset,
             # Process neighborhood genes (multiple occurrences) in a vectorized way
             neb_occ_dict = {}
             if Gn > 0:
-                neigh_gene_ids_tensor = torch.as_tensor(neighborhood_gene_ids, device=ns_tokens.device, dtype=ns_tokens.dtype)
+                neigh_gene_ids_tensor = torch.as_tensor(neighborhood_gene_ids, device=udata['tokens'].device, dtype=udata['tokens'].dtype)
                 for compute_cosine_with in compute_cosine_with_list:
                     emb_ctx = n_emb if compute_cosine_with == 'neighborhood' else c_emb  # select embedding context
                     if compute_cosine_with == 'neighborhood':
-                        seg = ns_tokens[:, seq_len_cell:]  # (N, L_neb) neighborhood tokens
+                        seg = udata['tokens'][:, seq_len_cell:]  # (N, L_neb) neighborhood tokens
                         base_offset = seq_len_cell        # offset indices into full sequence positions
                     else:
-                        seg = ns_tokens[:, :seq_len_cell]  # (N, L_cell) cell tokens
+                        seg = udata['tokens'][:, :seq_len_cell]  # (N, L_cell) cell tokens
                         base_offset = 0                     # no offset in cell segment
                     Lseg = seg.shape[1]
                     # Equality mask across all genes: True where token equals the gene id

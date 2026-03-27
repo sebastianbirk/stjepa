@@ -21,7 +21,7 @@ from tqdm import tqdm
 from pyensembl import EnsemblRelease
 from scipy.sparse import issparse
 
-from stjepa.datasets.cell_datasets import CellBaseDataset, init_cell_dataset
+from stjepa.datasets.cell_datasets import CellDataset
 from stjepa.datasets.dataloaders import init_dataloader_and_sampler
 from stjepa.tokenizers import cell_tokenizers
 from stjepa.utils.embedding import (create_binary_selection_mask,

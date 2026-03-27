@@ -21,9 +21,12 @@ Key differences from the standard NicheJEPA JEPA training loop
       agree (``(proj.mean(0) - proj)²``).
     - *SIGReg*: prevents collapse by penalising the deviation of the
       empirical characteristic function of projections from a Gaussian CF.
-  * **Pooling** of per-token embeddings to a fixed-size cell vector is done
-    by either mean-pooling or selecting the first (CLS / assay / batch)
-    special token.
+  * **Adversarial batch-effect removal (optional).**
+    When ``adversarial_labels`` is non-empty, adversarial classification
+    heads with gradient reversal are attached to the mean-pooled gene-token
+    representations.  The adversarial cross-entropy loss is weighted by
+    ``adv_weight`` and added to the total loss.  Setting ``adv_weight=0``
+    disables the adversarial loss.
 
 Usage
 -----
@@ -49,9 +52,11 @@ from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
 from app.utils import init_stjepa_model, init_stjepa_opt
-from stjepa.datasets.cell_datasets import init_cell_dataset
+from stjepa.datasets.cell_datasets import CellDataset
 from stjepa.datasets.dataloaders import init_dataloader_and_sampler
 from stjepa.masks.view_masking import ViewMaskCollator
+from stjepa.models.adversarial import (AdversarialHead,
+                                        adversarial_lambda_schedule)
 from stjepa.models.sigreg import SIGReg
 from stjepa.utils.distributed import init_distributed
 from stjepa.utils.logging import AverageMeter, grad_logger
@@ -70,7 +75,7 @@ logger = logging.getLogger()
 # Pooling helpers
 # ---------------------------------------------------------------------------
 
-def _pool(x: torch.Tensor, mode: str, n_special_tokens: int) -> torch.Tensor:
+def _pool(x: torch.Tensor, mode: str) -> torch.Tensor:
     """
     Reduce per-token encoder output ``[B, L, D]`` to ``[B, D]``.
 
@@ -79,24 +84,14 @@ def _pool(x: torch.Tensor, mode: str, n_special_tokens: int) -> torch.Tensor:
     x:
         Encoder output for a single view, shape ``(B, L, D)``.
     mode:
-        ``'mean'``: mean-pool over all L positions (gene tokens +
-        special tokens).  Works regardless of whether special tokens are
-        present.
-        ``'mean_gene'``: mean-pool over gene-token positions only
-        (i.e., positions ``n_special_tokens:``).
-    n_special_tokens:
-        Number of special tokens prepended by the collator; used only
-        when ``mode='mean_gene'``.
+        ``'mean'``: mean-pool over all L positions.
 
     Returns
     -------
     pooled:
         Shape ``(B, D)``.
     """
-    if mode == "mean_gene":
-        return x[:, n_special_tokens:, :].mean(dim=1)
-    else:  # 'mean'
-        return x.mean(dim=1)
+    return x.mean(dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -169,13 +164,10 @@ def train_stjepa(
     num_workers           = args["data"]["num_workers"]
     pin_memory            = args["data"]["pin_memory"]
     sep_gene_tokens_neb   = args["data"].get("sep_gene_tokens_neb", False)
-    nz_spc                = args["data"].get("nz_spc", False)
     use_sampler           = args["data"].get("use_sampler", False)
     mega_batch_mult_max   = args["data"].get("mega_batch_mult_max", 1000)
-    n_special_values      = args["data"]["n_special_values"]
 
     # Config parsing – meta / model
-    add_cls             = args["meta"]["add_cls"]
     gt_type             = args["meta"]["gt_type"]
     count_encoding      = args["meta"]["count_encoding"]
     n_value_bins        = args["meta"]["n_value_bins"]
@@ -184,12 +176,9 @@ def train_stjepa(
     enc_emb_dim         = args["meta"]["enc_emb_dim"]
     num_heads           = args["meta"].get("num_heads", 8)
     mlp_ratio           = args["meta"].get("mlp_ratio", 4.0)
-    special_tokens      = args["meta"]["special_tokens"]
     use_bfloat16        = args["meta"]["use_bfloat16"]
     use_flash_attention = args["meta"]["use_flash_attention"]
-    use_layer_norm      = args["meta"]["use_layer_norm"]
     pos_learnable       = args["meta"].get("pos_learnable", False)
-    nz_spc_meta         = args["meta"].get("nz_spc", False)  # may differ
     mlp_bias            = args["meta"].get("mlp_bias", False)
 
     # Config parsing – ST-JEPA-specific
@@ -203,7 +192,15 @@ def train_stjepa(
     proj_norm       = args["stjepa"].get("proj_norm", "bn")
     n_sigreg_knots  = args["stjepa"].get("n_sigreg_knots", 17)
     n_sigreg_proj   = args["stjepa"].get("n_sigreg_proj", 256)
-    always_include_special = args["stjepa"].get("always_include_special", True)
+
+    # Config parsing – adversarial
+    adv_cfg             = args.get("adversarial", {})
+    adversarial_labels  = adv_cfg.get("labels", [])
+    adv_weight          = adv_cfg.get("weight", 0.0)
+    adv_schedule_gamma  = adv_cfg.get("schedule_gamma", 10.0)
+    adv_hidden_dim      = adv_cfg.get("hidden_dim", None)
+    # n_classes per label: dict mapping label name -> number of classes
+    adv_n_classes       = adv_cfg.get("n_classes", {})
 
     # Config parsing – optimisation
     warmup       = args["optimization"]["warmup"]
@@ -242,8 +239,7 @@ def train_stjepa(
         token_dict = pickle.load(fh)
     vocab_size = len(token_dict)
 
-    n_special_tokens = len(special_tokens)
-    seq_len = seq_len_cell + seq_len_neighborhood + n_special_tokens
+    seq_len = seq_len_cell + seq_len_neighborhood
 
     # ------------------------------------------------------------------
     # Distributed setup
@@ -300,10 +296,8 @@ def train_stjepa(
         device=device,
         vocab_size=vocab_size,
         seq_len=seq_len,
-        n_special_tokens=n_special_tokens,
         n_segments=n_segments,
         proj_dim=proj_dim,
-        n_special_values=n_special_values,
         enc_emb_dim=enc_emb_dim,
         enc_depth=enc_depth,
         proj_hidden_dim=proj_hidden_dim,
@@ -311,10 +305,8 @@ def train_stjepa(
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         use_flash_attention=use_flash_attention,
-        use_layer_norm=use_layer_norm,
         sep_gene_tokens_neb=sep_gene_tokens_neb,
         pos_learnable=pos_learnable,
-        nz_spc=nz_spc_meta,
         mlp_bias=mlp_bias,
     )
 
@@ -322,14 +314,31 @@ def train_stjepa(
     sigreg = SIGReg(knots=n_sigreg_knots, n_projections=n_sigreg_proj).to(device)
 
     # ------------------------------------------------------------------
+    # Adversarial heads (one per label)
+    # ------------------------------------------------------------------
+    adv_heads: dict[str, AdversarialHead] = {}
+    use_adversarial = adv_weight > 0 and len(adversarial_labels) > 0
+    if use_adversarial:
+        for label_name in adversarial_labels:
+            n_cls = adv_n_classes[label_name]
+            head = AdversarialHead(
+                in_dim=enc_emb_dim,
+                n_classes=n_cls,
+                hidden_dim=adv_hidden_dim,
+            ).to(device)
+            adv_heads[label_name] = head
+            logger.info(
+                f"Adversarial head for '{label_name}': "
+                f"{sum(p.numel() for p in head.parameters()):,} params, "
+                f"{n_cls} classes.")
+
+    # ------------------------------------------------------------------
     # View mask collator
     # ------------------------------------------------------------------
     view_collator = ViewMaskCollator(
         V=V,
-        n_special_tokens=n_special_tokens,
         min_view_ratio=min_view_ratio,
         max_view_ratio=max_view_ratio,
-        always_include_special=always_include_special,
     )
 
     # ------------------------------------------------------------------
@@ -338,37 +347,33 @@ def train_stjepa(
     if isinstance(train_dataset, list):
         train_cell_datasets = []
         for d, nz in zip(train_dataset, epoch_n_nonzero_tokens):
-            cell_d = init_cell_dataset(
+            cell_d = CellDataset(
                 dataset=d,
                 vocab_size=vocab_size,
                 seq_len_cell=seq_len_cell,
                 seq_len_neighborhood=seq_len_neighborhood,
-                tokenizer_type=tokenizer_type,
                 gt_type=gt_type,
                 cell_pos_enc=cell_pos_enc,
-                special_tokens=special_tokens,
+                adversarial_labels=adversarial_labels,
                 sampling_strategy=sampling_strategy,
                 n_nonzero_tokens_list=nz,
                 include_cell_id=False,
                 sep_gene_tokens_neb=sep_gene_tokens_neb,
-                nz_spc=nz_spc,
             )
             train_cell_datasets.append(cell_d)
     else:
-        train_cell_dataset = init_cell_dataset(
+        train_cell_dataset = CellDataset(
             dataset=train_dataset,
             vocab_size=vocab_size,
             seq_len_cell=seq_len_cell,
             seq_len_neighborhood=seq_len_neighborhood,
-            tokenizer_type=tokenizer_type,
             gt_type=gt_type,
             cell_pos_enc=cell_pos_enc,
-            special_tokens=special_tokens,
+            adversarial_labels=adversarial_labels,
             sampling_strategy=sampling_strategy,
             n_nonzero_tokens_list=n_nonzero_tokens,
             include_cell_id=False,
             sep_gene_tokens_neb=sep_gene_tokens_neb,
-            nz_spc=nz_spc,
         )
 
     if isinstance(train_dataset, list):
@@ -377,7 +382,7 @@ def train_stjepa(
             tl, ts = init_dataloader_and_sampler(
                 cell_dataset=cell_d,
                 batch_size=batch_size,
-                distributed=use_sampler,
+                use_length_grouped_sampler=use_sampler,
                 world_size=world_size,
                 rank=rank,
                 collate_fn=view_collator,
@@ -394,7 +399,7 @@ def train_stjepa(
         train_loader, train_sampler = init_dataloader_and_sampler(
             cell_dataset=train_cell_dataset,
             batch_size=batch_size,
-            distributed=use_sampler,
+            use_length_grouped_sampler=use_sampler,
             world_size=world_size,
             rank=rank,
             collate_fn=view_collator,
@@ -412,9 +417,12 @@ def train_stjepa(
         ipe = len(train_loader)
     print(f"Iterations per epoch: {ipe}.")
 
+    total_steps = num_epochs * ipe
+
     # ------------------------------------------------------------------
     # Optimiser and schedulers
     # ------------------------------------------------------------------
+    extra_params = list(adv_heads.values()) if use_adversarial else None
     optimizer, scaler, scheduler, wd_scheduler = init_stjepa_opt(
         encoder=encoder,
         proj_head=proj_head,
@@ -428,6 +436,7 @@ def train_stjepa(
         num_epochs=num_epochs,
         ipe_scale=ipe_scale,
         use_bfloat16=use_bfloat16,
+        extra_params=extra_params,
     )
 
     # ------------------------------------------------------------------
@@ -452,6 +461,16 @@ def train_stjepa(
         gradient_as_bucket_view=True,
         broadcast_buffers=False,
     )
+    # DDP-wrap adversarial heads
+    ddp_adv_heads: dict[str, DistributedDataParallel] = {}
+    for label_name, head in adv_heads.items():
+        ddp_adv_heads[label_name] = DistributedDataParallel(
+            head,
+            device_ids=[LOCAL_RANK],
+            output_device=LOCAL_RANK,
+            gradient_as_bucket_view=True,
+            broadcast_buffers=False,
+        )
 
     # ------------------------------------------------------------------
     # Checkpoint loading
@@ -464,6 +483,11 @@ def train_stjepa(
             encoder.load_state_dict(ckpt["encoder"])
             proj_head.load_state_dict(ckpt["proj_head"])
             optimizer.load_state_dict(ckpt["opt"])
+            # Restore adversarial heads if present
+            for label_name in adv_heads:
+                key = f"adv_head_{label_name}"
+                if key in ckpt:
+                    ddp_adv_heads[label_name].load_state_dict(ckpt[key])
             logger.info(f"Resumed from checkpoint: {load_path} (epoch {start_epoch}).")
             for _ in range(start_epoch * ipe):
                 scheduler.step()
@@ -487,6 +511,9 @@ def train_stjepa(
             "world_size": world_size,
             "lr":         lr,
         }
+        # Save adversarial heads
+        for label_name, ddp_head in ddp_adv_heads.items():
+            save_dict[f"adv_head_{label_name}"] = ddp_head.state_dict()
         if itr is not None:
             save_dict["iter_number"] = itr
         if rank == 0:
@@ -511,12 +538,16 @@ def train_stjepa(
         loss_meter     = AverageMeter()
         inv_loss_meter = AverageMeter()
         sig_loss_meter = AverageMeter()
+        adv_loss_meter = AverageMeter()
 
         for itr, (udata, view_masks, _masks_attention) in enumerate(train_loader):
 
+            global_step = epoch * ipe + itr
+
             # Move data to device
             for key, val in udata.items():
-                udata[key] = val.to(device, non_blocking=True)
+                if isinstance(val, torch.Tensor):
+                    udata[key] = val.to(device, non_blocking=True)
             # view_masks: list of V tensors [B, view_len]
             view_masks = [m.to(device, non_blocking=True) for m in view_masks]
 
@@ -524,6 +555,13 @@ def train_stjepa(
 
             _new_lr = scheduler.step()
             _new_wd = wd_scheduler.step()
+
+            # Update adversarial lambda schedule
+            if use_adversarial:
+                lambd = adversarial_lambda_schedule(
+                    global_step, total_steps, adv_schedule_gamma)
+                for ddp_head in ddp_adv_heads.values():
+                    ddp_head.module.set_lambd(lambd)
 
             # --------------------------------------------------------------
             # Forward pass
@@ -533,12 +571,6 @@ def train_stjepa(
             ):
                 # Encode all V views in one call via EncoderMultiMaskWrapper.
                 # view_embeds: list of V tensors, each [B, view_len, D]
-                #
-                # masks_attention is NOT passed here because apply_masks
-                # changes the sequence length from N (full) to view_len.
-                # Since ViewMaskCollator only selects non-padded tokens,
-                # every position in the view is valid — no attention mask
-                # is needed.
                 view_embeds, _ = encoder(
                     batch=udata,
                     masks=view_masks,
@@ -547,23 +579,42 @@ def train_stjepa(
 
                 # Pool each view to [B, D] and project to [B, proj_dim]
                 projs: list[torch.Tensor] = []
+                pooled_views: list[torch.Tensor] = []
                 for x_v in view_embeds:
-                    emb_v = _pool(x_v, pooling, n_special_tokens)  # [B, D]
-                    projs.append(proj_head(emb_v))                  # [B, proj_dim]
+                    emb_v = _pool(x_v, pooling)  # [B, D]
+                    pooled_views.append(emb_v)
+                    projs.append(proj_head(emb_v))  # [B, proj_dim]
 
                 # Stack: [V, B, proj_dim]
                 proj = torch.stack(projs, dim=0)
 
                 # -- Invariance loss --
-                # Encourage all V projections of the same cell to agree with
-                # their mean; equivalent to sum_{v} ||proj_v - proj_mean||²
                 inv_loss = (proj.mean(0, keepdim=True) - proj).square().mean()
 
                 # -- SIGReg loss --
                 sigreg_loss = sigreg(proj)
 
+                # -- Adversarial loss --
+                adv_loss = torch.tensor(0.0, device=device)
+                if use_adversarial:
+                    for label_name, ddp_head in ddp_adv_heads.items():
+                        labels = udata[label_name]  # [B]
+                        # Apply adversarial head to every view independently
+                        for emb_v in pooled_views:
+                            logits = ddp_head(emb_v)  # [B, n_classes]
+                            labels = labels.squeeze(-1) # TODO TEMP FIX
+                            labels = (labels == 103).long()
+                            #print('logits:', logits)
+                            #print('labels:', labels)
+                            adv_loss = adv_loss + F.cross_entropy(
+                                logits, labels)
+                    # Average over views and labels
+                    adv_loss = adv_loss / (V * len(adversarial_labels))
+
                 # -- Combined ST-JEPA loss --
-                loss = (1.0 - lamb) * inv_loss + lamb * sigreg_loss
+                loss = ((1.0 - lamb) * inv_loss
+                        + lamb * sigreg_loss
+                        + adv_weight * adv_loss)
 
             # --------------------------------------------------------------
             # Backward pass
@@ -592,20 +643,24 @@ def train_stjepa(
             loss_meter.update(float(loss))
             inv_loss_meter.update(float(inv_loss))
             sig_loss_meter.update(float(sigreg_loss))
+            if use_adversarial:
+                adv_loss_meter.update(float(adv_loss))
 
             if WORLD_RANK == 0 and (itr % log_freq == 0):
-                wandb.log(
-                    {
-                        "loss/total":    float(loss),
-                        "loss/inv":      float(inv_loss),
-                        "loss/sigreg":   float(sigreg_loss),
-                        "lr":            float(_new_lr),
-                        "wd":            float(_new_wd),
-                        "epoch":         int(epoch),
-                        "global_norm_enc": float(grad_stats.global_norm)
-                        if grad_stats is not None else 0.0,
-                    }
-                )
+                log_dict = {
+                    "loss/total":    float(loss),
+                    "loss/inv":      float(inv_loss),
+                    "loss/sigreg":   float(sigreg_loss),
+                    "lr":            float(_new_lr),
+                    "wd":            float(_new_wd),
+                    "epoch":         int(epoch),
+                    "global_norm_enc": float(grad_stats.global_norm)
+                    if grad_stats is not None else 0.0,
+                }
+                if use_adversarial:
+                    log_dict["loss/adversarial"] = float(adv_loss)
+                    log_dict["adv_lambda"] = lambd
+                wandb.log(log_dict)
 
             assert not np.isnan(float(loss)), "Loss is NaN — aborting."
 
@@ -615,8 +670,9 @@ def train_stjepa(
                 save_checkpoint(epoch, itr // checkpoint_freq_iter)
 
         # -- End of epoch --
+        adv_str = f" | adv {adv_loss_meter.avg:.4f}" if use_adversarial else ""
         logger.info(
             f"Epoch {epoch} | loss {loss_meter.avg:.4f} | "
             f"inv {inv_loss_meter.avg:.4f} | "
-            f"sigreg {sig_loss_meter.avg:.4f}")
+            f"sigreg {sig_loss_meter.avg:.4f}{adv_str}")
         save_checkpoint(epoch)

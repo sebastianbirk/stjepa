@@ -37,11 +37,6 @@ class ProjectionHead(nn.Module):
     lower-dimensional projection space (shape ``[B, proj_dim]``) via two
     hidden layers with optional normalisation and GELU activations.
 
-    Follows the architecture from:
-        Quillent, A., Bourdoukan, R. & Löwe, S.  ST-JEPA: Provable and
-        Scalable Self-Supervised Learning Without the Heuristics.
-        arXiv:2502.01048 (2025).
-
     Parameters
     ----------
     in_dim:
@@ -61,7 +56,7 @@ class ProjectionHead(nn.Module):
         in_dim: int,
         proj_dim: int,
         hidden_dim: int | None = None,
-        norm: Literal["bn", "ln", "none"] = "bn",
+        norm: Literal["bn", "ln", "none"] = "ln",
     ):
         super().__init__()
         hidden_dim = hidden_dim or (in_dim * 4)
@@ -95,17 +90,6 @@ class ProjectionHead(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        x:
-            Pooled encoder representations of shape ``(B, in_dim)``.
-
-        Returns
-        -------
-        proj:
-            Projected representations of shape ``(B, proj_dim)``.
-        """
         return self.layers(x)
 
 
@@ -117,21 +101,17 @@ def init_stjepa_model(
     device: str,
     vocab_size: int,
     seq_len: int,
-    n_special_tokens: int,
     n_segments: int,
     proj_dim: int,
-    n_special_values: int | None = None,
     enc_emb_dim: int = 768,
     enc_depth: int = 12,
     proj_hidden_dim: int | None = None,
-    proj_norm: Literal["bn", "ln", "none"] = "bn",
+    proj_norm: Literal["bn", "ln", "none"] = "ln",
     num_heads: int = 8,
     mlp_ratio: float = 4.0,
     use_flash_attention: bool = True,
-    use_layer_norm: bool = True,
     sep_gene_tokens_neb: bool = False,
     pos_learnable: bool = False,
-    nz_spc: bool = False,
     mlp_bias: bool = False,
 ) -> tuple[EncoderMultiMaskWrapper, "ProjectionHead"]:
     """
@@ -139,23 +119,6 @@ def init_stjepa_model(
 
     ST-JEPA is a single-network, no-EMA method: only an encoder and a
     projection head are created (no predictor, no target encoder).
-
-    Parameters
-    ----------
-    gt_type, count_encoding, n_value_bins, cell_pos_enc, device,
-    vocab_size, seq_len, n_special_tokens, n_segments,
-    n_special_values, enc_emb_dim, enc_depth, num_heads, mlp_ratio,
-    use_flash_attention, use_layer_norm, sep_gene_tokens_neb,
-    pos_learnable, nz_spc, mlp_bias:
-        Gene transformer encoder configuration parameters.
-    proj_dim:
-        Output dimensionality of the projection head.
-    proj_hidden_dim:
-        Hidden width of the projection head MLP.  Defaults to
-        ``4 × enc_emb_dim``.
-    proj_norm:
-        Normalisation in the projection head: ``'bn'`` (BatchNorm1d),
-        ``'ln'`` (LayerNorm), or ``'none'``.
 
     Returns
     -------
@@ -165,33 +128,25 @@ def init_stjepa_model(
         ``ProjectionHead`` MLP that maps pooled encoder outputs to the
         projection space.
     """
-    # Build the encoder backbone (always api_version='v4' for multi-mask
-    # wrapper support, which is needed to encode V views in one call)
     encoder = gt.__dict__["init_gt_encoder"](
         encoder_type=gt_type,
-        n_special_values=n_special_values,
         count_encoding=count_encoding,
         n_value_bins=n_value_bins,
         cell_pos_enc=cell_pos_enc,
         vocab_size=vocab_size,
         seq_len=seq_len,
-        n_special_tokens=n_special_tokens,
         n_segments=n_segments,
         embed_dim=enc_emb_dim,
         depth=enc_depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         use_flash_attention=use_flash_attention,
-        use_layer_norm=use_layer_norm,
-        api_version="v4",
         sep_gene_tokens_neb=sep_gene_tokens_neb,
         pos_learnable=pos_learnable,
-        nz_spc=nz_spc,
         mlp_bias=mlp_bias,
     )
     encoder = EncoderMultiMaskWrapper(encoder)
 
-    # Build the projection head
     proj_head = ProjectionHead(
         in_dim=enc_emb_dim,
         proj_dim=proj_dim,
@@ -240,6 +195,7 @@ def init_stjepa_opt(
     final_lr: float = 0.0,
     use_bfloat16: bool = False,
     ipe_scale: float = 1.25,
+    extra_params: list | None = None,
 ) -> tuple[torch.optim.AdamW, None, WarmupCosineSchedule, CosineWDSchedule]:
     """
     Initialise the AdamW optimiser and cosine LR / WD schedulers for
@@ -247,33 +203,32 @@ def init_stjepa_opt(
 
     Parameters
     ----------
-    encoder:
-        The wrapped encoder module.
-    proj_head:
-        The projection head module.
-    iterations_per_epoch, start_lr, ref_lr, warmup, num_epochs, wd,
-    final_wd, final_lr, use_bfloat16, ipe_scale:
-        Training schedule configuration parameters.
+    extra_params:
+        Optional list of additional parameter groups (e.g. adversarial
+        heads) to include in the optimiser.
 
     Returns
     -------
     optimizer, scaler (always None for bfloat16), scheduler, wd_scheduler
     """
-    # Separate weight-decayed params from bias / 1-D params
+    all_named = (
+        list(encoder.named_parameters())
+        + list(proj_head.named_parameters())
+    )
+    if extra_params:
+        for extra_module in extra_params:
+            all_named += list(extra_module.named_parameters())
+
     param_groups = [
         {
             "params": [
-                p
-                for n, p in list(encoder.named_parameters())
-                + list(proj_head.named_parameters())
+                p for n, p in all_named
                 if ("bias" not in n) and (len(p.shape) != 1)
             ]
         },
         {
             "params": [
-                p
-                for n, p in list(encoder.named_parameters())
-                + list(proj_head.named_parameters())
+                p for n, p in all_named
                 if ("bias" in n) or (len(p.shape) == 1)
             ],
             "WD_exclude": True,
@@ -302,7 +257,6 @@ def init_stjepa_opt(
         T_max=int(ipe_scale * num_epochs * iterations_per_epoch),
     )
 
-    # GradScaler should not be used with bfloat16
     scaler = None
 
     return optimizer, scaler, scheduler, wd_scheduler
@@ -320,36 +274,24 @@ def init_model(
     device: str,
     vocab_size: int,
     seq_len: int,
-    n_special_tokens: int,
     n_segments: int,
-    n_special_values: int | None = None,
     enc_emb_dim: int = 768,
     enc_depth: int = 12,
     num_heads: int = 8,
     mlp_ratio: float = 4.0,
     use_flash_attention: bool = True,
-    use_layer_norm: bool = True,
     sep_gene_tokens_neb: bool = False,
     pos_learnable: bool = False,
-    nz_spc: bool = False,
     mlp_bias: bool = False,
     proj_dim: int = 256,
     proj_hidden_dim: int | None = None,
-    proj_norm: Literal["bn", "ln", "none"] = "bn",
+    proj_norm: Literal["bn", "ln", "none"] = "ln",
 ) -> tuple[EncoderMultiMaskWrapper, "ProjectionHead"]:
     """
     High-level model factory used by inference scripts.
 
     Thin wrapper around :func:`init_stjepa_model` that keeps the call
-    signature expected by existing inference code (``encoder, _ = init_model(...)``).
-
-    Returns
-    -------
-    encoder:
-        ``EncoderMultiMaskWrapper``-wrapped encoder.
-    proj_head:
-        ``ProjectionHead`` (not needed for inference but returned for
-        checkpoint-loading convenience).
+    signature expected by existing inference code.
     """
     return init_stjepa_model(
         gt_type=gt_type,
@@ -359,10 +301,8 @@ def init_model(
         device=device,
         vocab_size=vocab_size,
         seq_len=seq_len,
-        n_special_tokens=n_special_tokens,
         n_segments=n_segments,
         proj_dim=proj_dim,
-        n_special_values=n_special_values,
         enc_emb_dim=enc_emb_dim,
         enc_depth=enc_depth,
         proj_hidden_dim=proj_hidden_dim,
@@ -370,10 +310,8 @@ def init_model(
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         use_flash_attention=use_flash_attention,
-        use_layer_norm=use_layer_norm,
         sep_gene_tokens_neb=sep_gene_tokens_neb,
         pos_learnable=pos_learnable,
-        nz_spc=nz_spc,
         mlp_bias=mlp_bias,
     )
 
@@ -388,34 +326,9 @@ def load_checkpoint(
     """
     Load an ST-JEPA checkpoint.
 
-    The checkpoint dict is expected to contain at least the key
-    ``"encoder"`` (state dict of the ``EncoderMultiMaskWrapper``).
-    Optionally it may contain ``"proj_head"``, ``"opt"``, and
-    ``"epoch"``.
-
     Handles the common case where the checkpoint was saved under DDP
     (state-dict keys prefixed with ``module.``): the prefix is stripped
     automatically if the target model is **not** wrapped in DDP.
-
-    Parameters
-    ----------
-    device:
-        Map location for ``torch.load``.
-    r_path:
-        Path to the ``.pth.tar`` / ``.pt`` checkpoint file.
-    encoder:
-        Encoder module to load weights into.
-    opt:
-        Optimizer to restore (optional, inference can pass ``None``).
-    proj_head:
-        Projection head to load weights into (optional).
-
-    Returns
-    -------
-    encoder:
-        The encoder with loaded weights (or ``None`` if not provided).
-    epoch:
-        The epoch stored in the checkpoint (``0`` if absent).
     """
     ckpt = torch.load(r_path, map_location=device)
 

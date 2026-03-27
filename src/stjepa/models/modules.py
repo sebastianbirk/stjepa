@@ -133,8 +133,6 @@ class Block(nn.Module):
         Dropout ratio in attention layer of Attention module.
     act_layer:
         Activation layer used in MLP module.
-    use_layer_norm:
-        If `True`, use LayerNorm, else use dynamic tanh.
     norm_layer:
         Normalization layer.
     use_flash_attention:
@@ -149,15 +147,12 @@ class Block(nn.Module):
                  drop: float = 0.0,
                  attn_drop: float=0.0,
                  act_layer: nn.modules.activation=nn.GELU,
-                 use_layer_norm: bool=True,
                  norm_layer: nn.modules.normalization=nn.LayerNorm,
                  use_flash_attention: bool=True,
+                 **kwargs,
                  ):
         super().__init__()
-        if use_layer_norm:
-            self.norm1 = norm_layer(dim)
-        else:
-            self.norm1 = DyT(dim)
+        self.norm1 = norm_layer(dim)
         self.attn = Attention(dim,
                               num_heads=num_heads,
                               qkv_bias=qkv_bias,
@@ -165,10 +160,7 @@ class Block(nn.Module):
                               attn_drop=attn_drop,
                               proj_drop=drop,
                               use_flash_attention=use_flash_attention)
-        if use_layer_norm:
-            self.norm2 = norm_layer(dim)
-        else:
-            self.norm2 = DyT(dim)
+        self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = MLP(in_features=dim,
                        hidden_features=mlp_hidden_dim,
@@ -266,31 +258,6 @@ class ClassificationModel(nn.Module):
         
         logits = self.classification_head(h)
         return logits
-
-
-class DyT(nn.Module):
-    """
-    Dynamic tanh module.
-
-    Parameters
-    -----------
-    num_features:
-        Number of features.
-    alpha_init_value:
-        Initial value for alpha.
-    """
-    def __init__(self,
-                 num_features: int,
-                 alpha_init_value: float = 0.5
-                 ):
-        super().__init__()
-        self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
-        self.weight = nn.Parameter(torch.ones(num_features))
-        self.bias = nn.Parameter(torch.zeros(num_features))
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = torch.tanh(self.alpha * x)
-        return x * self.weight + self.bias
 
 
 class MLP(nn.Module):

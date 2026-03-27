@@ -1,17 +1,10 @@
-from typing import Literal
+from typing import List, Literal
 
 import anndata
 import numpy as np
 import pandas as pd
-import scib_metrics as sm
 import torch
 from tqdm import tqdm
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, pairwise_distances
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.metrics.pairwise import rbf_kernel
-from scipy.stats import wasserstein_distance
-from typing import List
 
 
 def classification_metrics(adata: anndata.AnnData,
@@ -42,6 +35,10 @@ def classification_metrics(adata: anndata.AnnData,
         A dictionary containing accuracy and F1 scores for both the training and
         test sets.
     """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.neighbors import KNeighborsClassifier
+
     # Split the data into training and testing sets
     X = adata.obsm['jepa_emb']
     y = adata.obs[label_col]
@@ -111,6 +108,7 @@ def clustering_metrics(adata: anndata.AnnData,
     # Calculate NMI and ARI using K-Means clustering
     embeddings = adata.obsm[emb_key]
     true_labels = adata.obs[label_col]
+    import scib_metrics as sm  # optional dep
     results = sm.nmi_ari_cluster_labels_kmeans(embeddings, true_labels)
     print(f"NMI (Normalized Mutual Information): {results['nmi']}")
     print(f"ARI (Adjusted Rand Index): {results['ari']}")
@@ -138,6 +136,7 @@ def compute_energy_distance(
     e_distance : float
         Energy distance between the two distributions.
     """
+    from sklearn.metrics import pairwise_distances
     sigma_X = pairwise_distances(x, x, metric="sqeuclidean").mean()
     sigma_Y = pairwise_distances(y, y, metric="sqeuclidean").mean()
     delta = pairwise_distances(x, y, metric="sqeuclidean").mean()
@@ -165,6 +164,7 @@ def compute_maximum_mean_discrepancy(
     mmd : float
         Maximum mean discrepancy between the two distributions.
     """
+    from sklearn.metrics.pairwise import rbf_kernel
     xx = rbf_kernel(x, x, gamma)
     xy = rbf_kernel(x, y, gamma)
     yy = rbf_kernel(y, y, gamma)
@@ -217,6 +217,7 @@ def compute_emd(
     emd_value : float
         The average 1D EMD across all feature dimensions.
     """
+    from scipy.stats import wasserstein_distance
     emds = []
     # Compute 1D EMD for each feature
     for dim in range(x.shape[1]):
