@@ -42,6 +42,21 @@ class ViewMaskCollator:
     max_view_ratio:
         Maximum fraction of a cell's non-padded gene tokens to include in
         a single view.  Must be in (0, 1] and >= min_view_ratio.
+    sample_segments:
+        If ``True``, randomly sample the number of neighbor segments to
+        keep each batch, matching the behaviour of ``BlockMaskCollator``.
+    n_segments:
+        Total number of segments (cell + neighbors).  Required when
+        ``sample_segments=True``.
+    seq_len_cell:
+        Number of tokens per segment.  Required when
+        ``sample_segments=True``.
+    n_special_tokens:
+        Number of special tokens prepended to the sequence.  Required
+        when ``sample_segments=True``.
+    cell_segment_sampling_ratio:
+        Probability of keeping only the cell segment (k=1) when
+        ``sample_segments=True``.  Matches ``BlockMaskCollator`` default.
     """
 
     def __init__(
@@ -49,16 +64,29 @@ class ViewMaskCollator:
         V: int,
         min_view_ratio: float = 0.2,
         max_view_ratio: float = 0.8,
+        sample_segments: bool = False,
+        n_segments: int | None = None,
+        seq_len_cell: int | None = None,
+        n_special_tokens: int = 0,
+        cell_segment_sampling_ratio: float = 0.09090909090909091,
     ):
         assert 0 < min_view_ratio <= max_view_ratio <= 1.0, (
             "Require 0 < min_view_ratio <= max_view_ratio <= 1.0, "
             f"got {min_view_ratio} and {max_view_ratio}.")
         assert V >= 1, f"Need at least 1 view, got V={V}."
+        if sample_segments:
+            assert n_segments is not None and seq_len_cell is not None, (
+                "n_segments and seq_len_cell are required when "
+                "sample_segments=True.")
 
         self.V = V
         self.min_view_ratio = min_view_ratio
         self.max_view_ratio = max_view_ratio
-
+        self.sample_segments = sample_segments
+        self.n_segments = n_segments
+        self.seq_len_cell = seq_len_cell
+        self.n_special_tokens = n_special_tokens
+        self.cell_segment_sampling_ratio = cell_segment_sampling_ratio
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -119,59 +147,49 @@ class ViewMaskCollator:
         self,
         batch: list[dict],
     ) -> tuple[dict, list[torch.Tensor], torch.Tensor]:
-        """
-        Collate a batch and produce V view masks per sample.
 
-        Parameters
-        ----------
-        batch:
-            List of per-sample dictionaries as returned by the cell
-            dataset.  Must contain at least ``'tokens'``; all other keys
-            (``'positions'``, ``'segments'``, ``'values'``,
-            ``'rel_x_coords'``, ``'rel_y_coords'``, …) are collated
-            unchanged.
-
-        Returns
-        -------
-        collated:
-            Standard collated batch dictionary (all fields stacked along
-            a new batch dimension).
-        view_masks:
-            List of V tensors, each of shape ``(B, min_view_len)``,
-            containing the token indices for that view.  All views are
-            trimmed to the minimum view length observed in the batch so
-            that they can be stacked into a rectangular tensor.
-            These masks can be passed directly to
-            ``EncoderMultiMaskWrapper`` (which expects a list of masks,
-            one per forward pass).
-        masks_attention:
-            Boolean attention mask derived from the *full* (unmasked)
-            token sequence, shape ``(B, 1, 1, N)``.  A position is
-            ``True`` where the token is non-zero.  Pass this to the
-            encoder so that padded positions in the full sequence are
-            never attended to.
-        """
         collated = torch.utils.data.default_collate(batch)
+
+        # ------------------------------------------------------------------
+        # Segment sampling — zero out neighbor segments beyond sampled k
+        # ------------------------------------------------------------------
+        if self.sample_segments:
+            if torch.rand(1).item() < self.cell_segment_sampling_ratio:
+                k = 1
+            else:
+                k = torch.randint(
+                    low=2, high=self.n_segments + 1, size=(1,)).item()
+            cutoff = self.n_special_tokens + self.seq_len_cell * k
+
+            for field, pad_val in (
+                ("tokens",      0),
+                ("segments",    0),
+                ("positions",   0),
+                ("values",      0.0),
+                ("rel_x_coords", float("-inf")),
+                ("rel_y_coords", float("-inf")),
+            ):
+                if field in collated:
+                    collated[field][:, cutoff:] = pad_val
+
+        # ------------------------------------------------------------------
+        # Attention mask and view sampling (unchanged from here down)
+        # ------------------------------------------------------------------
         tokens = collated["tokens"]   # [B, N]
         B = tokens.shape[0]
 
-        # Full-sequence attention mask (True = valid, False = padding)
         masks_attention = (tokens != 0).unsqueeze(1).unsqueeze(1)  # [B,1,1,N]
 
-        # Sample V views for every sample in the batch
         all_views: list[list[torch.Tensor]] = [
             self._sample_views(tokens[i]) for i in range(B)
         ]
 
-        # Trim to the global minimum view length so we can stack into a
-        # rectangular tensor without padding
         min_view_len: int = min(
             v.numel()
             for sample_views in all_views
             for v in sample_views
         )
 
-        # Build one [B, min_view_len] tensor per view
         view_masks: list[torch.Tensor] = []
         for v_idx in range(self.V):
             view_v = torch.stack(
@@ -180,7 +198,7 @@ class ViewMaskCollator:
                     for b in range(B)
                 ],
                 dim=0,
-            )  # [B, min_view_len]
+            )
             view_masks.append(view_v)
 
         return collated, view_masks, masks_attention
