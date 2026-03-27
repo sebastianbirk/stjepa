@@ -36,6 +36,7 @@ dependencies = [
     "anndata>=0.10",
     "scanpy>=1.9",
     "scipy>=1.11",
+    "squidpy",
     "pandas>=2.0",
     # Gene annotation (used in inference utils)
     "pyensembl>=2.2",
@@ -44,6 +45,8 @@ dependencies = [
     # Used in normalize_by_seurat (loess fitting); lazy-imported so the
     # module can load without it, but needed whenever Seurat normalisation is run.
     "scikit-misc>=0.3",
+    "jupyterlab",
+    "ipykernel"
 ]
 
 # ---------------------------------------------------------------------------
