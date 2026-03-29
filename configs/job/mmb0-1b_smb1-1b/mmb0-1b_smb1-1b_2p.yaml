@@ -5,9 +5,9 @@ job_requirement:
   LSB_DEFAULT_USERGROUP: team361
   QUEUE: "training-parallel"
   NUM_NODES: 1
-  NUM_GPUS_NODE: 8
-  NUM_PROCESSES_NODE: 64
-  MEM_NODE: 64
+  NUM_GPUS_NODE: 1 # 8
+  NUM_PROCESSES_NODE: 8 # 64
+  MEM_NODE: 8 # 64
 
 infiniband:
   NCCL_IB_DISABLE: 1
@@ -21,10 +21,10 @@ artifact:
   OUTPUT_DIR: "/nfs/team361/sb75/stjepa-reproducibility/artifacts/mmb0-1b_smb1-1b_2p"
   LOG_DIR: "/nfs/team361/sb75/stjepa-reproducibility/artifacts/mmb0-1b_smb1-1b_2p"
   EXPERIMENT_NAME: "stjepa_mmb0-1b_smb1-1b_2p"
-  RUN_NAME: "run1_stjepa"
+  RUN_NAME: "run30_stjepa_adversarial"
 
 runner_script:
   RUNNER_SCRIPT: "/nfs/team361/sb75/stjepa/src/app/training/train_model_lsf_mpirun_sanger.sh"
   TRAINING_SCRIPT_PATH: "/nfs/team361/sb75/stjepa/src/app/training/main_stjepa.py"
   BACKEND: "nccl"
-  CONFIG_FILE: "/nfs/team361/sb75/stjepa/configs/model/mmb0-1b_smb1-1b/mmb0-1b_smb1-1b_2p_2.yaml"
+  CONFIG_FILE: "/nfs/team361/sb75/stjepa/configs/model/mmb0-1b_smb1-1b/mmb0-1b_smb1-1b_2p_5.yaml"
