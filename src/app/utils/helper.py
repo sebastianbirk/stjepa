@@ -348,6 +348,7 @@ def load_checkpoint(
 
     if opt is not None and "opt" in ckpt:
         opt.load_state_dict(ckpt["opt"])
+        logger.info(f"Loaded optimizer.")
 
     epoch = ckpt.get("epoch", 0)
     logger.info(f"Checkpoint loaded from '{r_path}' — epoch {epoch}.")
