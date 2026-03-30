@@ -18,7 +18,7 @@ data:
   seq_len_neighborhood: 640
   n_segments: 11
   sampling_strategy: null
-  batch_size: 32
+  batch_size: 256
   num_workers: 16
   pin_memory: True
   sep_gene_tokens_neb: False
@@ -56,11 +56,11 @@ meta:
 # -----------------------------------------------------------------------------
 stjepa:
   V: 8
-  proj_dim: 64                  # Much smaller bottleneck — try 32-128
+  proj_dim: 32                  # Much smaller bottleneck — try 32-128
   lamb: 0.02                    # Mostly invariance, light regularization
-  pooling: 'mean_gene'
-  min_view_ratio: 0.4
-  max_view_ratio: 1.0
+  pooling: 'mean'
+  min_view_ratio: 0.2
+  max_view_ratio: 0.6
   always_include_special: True
   proj_hidden_dim: null
   proj_norm: 'ln'
@@ -70,7 +70,7 @@ stjepa:
 adversarial:
   labels: ['batch_value']
   weight: 0.1
-  schedule_gamma: 10.0
+  schedule_gamma: 2.0
   hidden_dim: 256
   n_classes:
     batch_value: 2 # Number of batches in the dataset, for adversarial batch classification head
@@ -79,10 +79,10 @@ adversarial:
 # Optimisation
 # -----------------------------------------------------------------------------
 optimization:
-  warmup: 3
-  epochs: 600
+  warmup: 1
+  epochs: 1200
   start_lr: 2.0e-05
-  lr: 6.0e-05
+  lr: 1.0e-04
   final_lr: 2.0e-05
   weight_decay: 0.04
   final_weight_decay: 0.4

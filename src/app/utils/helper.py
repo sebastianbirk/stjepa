@@ -340,14 +340,15 @@ def load_checkpoint(
 
     if encoder is not None and "encoder" in ckpt:
         encoder.load_state_dict(_maybe_strip_ddp(ckpt["encoder"]))
-        logger.info(f"Loaded encoder weights from {r_path}")
+        logger.info(f"Loaded encoder weights.")
 
     if proj_head is not None and "proj_head" in ckpt:
         proj_head.load_state_dict(_maybe_strip_ddp(ckpt["proj_head"]))
-        logger.info(f"Loaded projection head weights from {r_path}")
+        logger.info(f"Loaded projection head weights.")
 
     if opt is not None and "opt" in ckpt:
         opt.load_state_dict(ckpt["opt"])
 
     epoch = ckpt.get("epoch", 0)
+    logger.info(f"Checkpoint loaded from '{r_path}' — epoch {epoch}.")
     return encoder, epoch

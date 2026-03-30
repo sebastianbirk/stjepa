@@ -135,6 +135,7 @@ def main():
         )
         print(f"Run timestamp: {current_timestamp}.")
         if not wandb.run.resumed:
+            wandb.config.update(params)
             wandb.config.run_timestamp = current_timestamp
 
         artifact_root = "../stjepa-reproducibility/artifacts"
