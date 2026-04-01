@@ -155,7 +155,6 @@ def train_stjepa(
     # ------------------------------------------------------------------
     dataset_name          = args["data"]["dataset_name"]
     token_dict_folder_path = args["data"]["token_dict_folder_path"]
-    tokenizer_type        = args["data"]["tokenizer_type"]
     seq_len_cell          = args["data"]["seq_len_cell"]
     seq_len_neighborhood  = args["data"]["seq_len_neighborhood"]
     n_segments            = args["data"]["n_segments"]
@@ -199,8 +198,7 @@ def train_stjepa(
     adv_weight          = adv_cfg.get("weight", 0.0)
     adv_schedule_gamma  = adv_cfg.get("schedule_gamma", 10.0)
     adv_hidden_dim      = adv_cfg.get("hidden_dim", None)
-    # n_classes per label: dict mapping label name -> number of classes
-    adv_n_classes       = adv_cfg.get("n_classes", {})
+    adv_disc_update_freq = adv_cfg.get("disc_update_freq", 1)
 
     # Config parsing – optimisation
     warmup       = args["optimization"]["warmup"]
@@ -317,8 +315,37 @@ def train_stjepa(
     # Adversarial heads (one per label)
     # ------------------------------------------------------------------
     adv_heads: dict[str, AdversarialHead] = {}
+    adv_label_map: dict[str, dict[int, int]] = {}
     use_adversarial = adv_weight > 0 and len(adversarial_labels) > 0
     if use_adversarial:
+        raw_label_map = adv_cfg.get("label_map", {})
+        for label_name in adversarial_labels:
+            if label_name not in raw_label_map:
+                raise ValueError(
+                    f"adversarial label '{label_name}' has no entry in "
+                    f"adversarial.label_map. Please provide an explicit mapping, "
+                    f"e.g.:\n"
+                    f"  adversarial:\n"
+                    f"    label_map:\n"
+                    f"      {label_name}:\n"
+                    f"        102: 0\n"
+                    f"        103: 1"
+                )
+            mapping = {int(k): int(v) for k, v in raw_label_map[label_name].items()}
+            expected = set(range(max(mapping.values()) + 1))
+            if set(mapping.values()) != expected:
+                raise ValueError(
+                    f"label_map for '{label_name}' must map to contiguous "
+                    f"integers starting from 0, got {sorted(set(mapping.values()))}."
+                )
+            adv_label_map[label_name] = mapping
+
+        # Derive n_classes from label_map instead of requiring it in config
+        adv_n_classes = {
+            label_name: max(m.values()) + 1
+            for label_name, m in adv_label_map.items()
+        }
+
         for label_name in adversarial_labels:
             n_cls = adv_n_classes[label_name]
             head = AdversarialHead(
@@ -596,20 +623,25 @@ def train_stjepa(
 
                 # -- Adversarial loss --
                 adv_loss = torch.tensor(0.0, device=device)
+                adv_acc = torch.tensor(0.0, device=device)
                 if use_adversarial:
                     for label_name, ddp_head in ddp_adv_heads.items():
-                        labels = udata[label_name]  # [B]
-                        # Apply adversarial head to every view independently
+                        raw_labels = udata[label_name].squeeze(-1)
+                        remapped = torch.zeros_like(raw_labels, dtype=torch.long)
+                        for src, tgt in adv_label_map[label_name].items():
+                            remapped[raw_labels == src] = tgt
+
                         for emb_v in pooled_views:
-                            logits = ddp_head(emb_v)  # [B, n_classes]
-                            labels = labels.squeeze(-1) # TODO TEMP FIX
-                            labels = (labels == 103).long()
-                            #print('logits:', logits)
-                            #print('labels:', labels)
-                            adv_loss = adv_loss + F.cross_entropy(
-                                logits, labels)
-                    # Average over views and labels
+                            logits = ddp_head(emb_v)
+                            #if itr < 10: # DEBUG
+                            #    print("logits:", logits[:4])
+                            #    print("remapped:", remapped[:4])
+                            #    print("lambd:", lambd)
+                            adv_loss = adv_loss + F.cross_entropy(logits, remapped, label_smoothing=0.1)
+                            adv_acc = adv_acc + (logits.argmax(dim=-1) == remapped).float().mean()
+
                     adv_loss = adv_loss / (V * len(adversarial_labels))
+                    adv_acc = adv_acc / (V * len(adversarial_labels))
 
                 # -- Combined ST-JEPA loss --
                 loss = ((1.0 - lamb) * inv_loss
@@ -621,6 +653,10 @@ def train_stjepa(
             # --------------------------------------------------------------
             _enc_norm, _proj_norm = 0.0, 0.0
             loss.backward()
+
+            if use_adversarial and (global_step % adv_disc_update_freq != 0):
+                for ddp_head in ddp_adv_heads.values():
+                    ddp_head.zero_grad(set_to_none=True)
 
             if (epoch >= warmup) and (clip_grad is not None):
                 _enc_norm = torch.nn.utils.clip_grad_norm_(
@@ -660,6 +696,9 @@ def train_stjepa(
                 if use_adversarial:
                     log_dict["loss/adversarial"] = float(adv_loss)
                     log_dict["adv_lambda"] = lambd
+                    log_dict["adv_acc"] = float(adv_acc)
+                    log_dict["adv_disc_update"] = int(global_step % adv_disc_update_freq == 0)
+
                 wandb.log(log_dict)
 
             assert not np.isnan(float(loss)), "Loss is NaN — aborting."

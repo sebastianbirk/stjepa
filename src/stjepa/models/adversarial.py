@@ -55,6 +55,7 @@ class _GradientReversalFn(Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
+        #print(f"GRL backward called, lambd={ctx.lambd}, grad_norm={grad_output.norm():.4f}") # DEBUG
         return -ctx.lambd * grad_output, None
 
 

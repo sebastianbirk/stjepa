@@ -255,21 +255,13 @@ def embed_dataset(dataset: Dataset,
         #raise ValueError
 
         # Create mask for neighbor cell genes
-        if model_config['data']['tokenizer_type'] == 'cell_neighborhood':
-            neighborhood_mask = create_binary_selection_mask(
-                udata['tokens'],
-                selection_type="agg_neighborhood",
-                excluded_tokens=agg_excluded_tokens,
-                seq_len_cell=model_config['data']['seq_len_cell'],
-                top_k=top_k).cpu()
-        elif model_config['data']['tokenizer_type'] == 'cell_graph':
-            neighborhood_mask = create_binary_selection_mask(
-                udata['tokens'],
-                selection_type="agg_graph",
-                excluded_tokens=agg_excluded_tokens,
-                seq_len_cell=model_config['data']['seq_len_cell'],
-                top_k=top_k,
-                n_segments=model_config['data']['n_segments']).cpu()
+        neighborhood_mask = create_binary_selection_mask(
+            udata['tokens'],
+            selection_type="agg_graph",
+            excluded_tokens=agg_excluded_tokens,
+            seq_len_cell=model_config['data']['seq_len_cell'],
+            top_k=top_k,
+            n_segments=model_config['data']['n_segments']).cpu()
 
         # Average gene embeddings into cell and neighborhood embedding
         if agg_type == 'avg':                    
