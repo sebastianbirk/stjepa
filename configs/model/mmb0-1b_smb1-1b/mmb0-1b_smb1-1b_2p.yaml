@@ -8,7 +8,7 @@
 data:
   dataset_name: 'mmb0-1b_smb1-1b_2p'
   token_dict_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/tokenizer/token_dictionary_mus_musculus.pkl'
-  tokenized_data_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/gold/cell-graph-tokenizer/mmb0-1b_smb1-1b_2p/mmb0-1b_smb1-1b_2p_32_None_None_None_None_None_shifted_log_knn_10_704.dataset'
+  tokenized_data_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/gold/cell-graph-tokenizer/mmb0-1b_smb1-1b_2p/mmb0-1b_smb1-1b_2p_32_None_None_None_None_None_None_knn_10_704.dataset'
   tokenizer_type: 'cell_graph'
   precomputed_split: null
   precomputed_n_nonzero_tokens: null
@@ -26,7 +26,7 @@ data:
   n_special_values: 200
   mega_batch_mult_max: 1000
   count_cell_norm_method: null
-  count_count_norm_method: shifted_log
+  count_count_norm_method: null
   count_gene_norm_method: null
   rank_cell_norm_method: null
   rank_count_norm_method: null
@@ -55,34 +55,37 @@ meta:
 # ST-JEPA-specific parameters
 # -----------------------------------------------------------------------------
 stjepa:
-  V: 8
-  proj_dim: 32                  # Much smaller bottleneck — try 32-128
-  lamb: 0.02                    # Mostly invariance, light regularization
-  pooling: 'mean'
-  min_view_ratio: 0.2
-  max_view_ratio: 0.6
-  always_include_special: True
-  proj_hidden_dim: null
-  proj_norm: 'ln'
+  V: 4
+  always_include_special: true
+  lamb: 0.02
+  max_view_ratio: 0.8
+  min_view_ratio: 0.4
   n_sigreg_knots: 17
   n_sigreg_proj: 256
+  pooling: mean
+  proj_dim: 64
+  proj_hidden_dim: null
+  proj_norm: ln
 
 adversarial:
   labels: ['batch_value']
+  label_map:
+    batch_value:
+      102: 0
+      103: 1
+  hidden_dim: null
+  schedule_gamma: 5.0
   weight: 0.1
-  schedule_gamma: 2.0
-  hidden_dim: 256
-  n_classes:
-    batch_value: 2 # Number of batches in the dataset, for adversarial batch classification head
+  disc_update_freq: 3
 
 # -----------------------------------------------------------------------------
 # Optimisation
 # -----------------------------------------------------------------------------
 optimization:
   warmup: 1
-  epochs: 1200
+  epochs: 800
   start_lr: 2.0e-05
-  lr: 2.0e-03
+  lr: 6.0e-05
   final_lr: 2.0e-05
   weight_decay: 0.04
   final_weight_decay: 0.4
@@ -93,7 +96,7 @@ optimization:
 # State / logging / checkpointing
 # -----------------------------------------------------------------------------
 state:
-  log_freq: 20
+  log_freq: 1
   checkpoint_freq: 100
   checkpoint_freq_iter: 50000
   write_tag: stjepa

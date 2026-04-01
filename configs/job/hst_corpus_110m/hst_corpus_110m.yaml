@@ -5,8 +5,8 @@ job_requirement:
   LSB_DEFAULT_USERGROUP: team361
   QUEUE: "training-parallel"
   NUM_NODES: 1
-  NUM_GPUS_NODE: 1 # 8
-  NUM_PROCESSES_NODE: 8 # 64
+  NUM_GPUS_NODE: 8 # 8
+  NUM_PROCESSES_NODE: 64 # 64
   MEM_NODE: 256 # 64
 
 infiniband:
@@ -21,7 +21,7 @@ artifact:
   OUTPUT_DIR: "/nfs/team361/sb75/stjepa-reproducibility/artifacts/hst_corpus_110m"
   LOG_DIR: "/nfs/team361/sb75/stjepa-reproducibility/artifacts/hst_corpus_110m"
   EXPERIMENT_NAME: "stjepa_hst_corpus_110m"
-  RUN_NAME: "run8_stjepa_adversarial"
+  RUN_NAME: "run14_stjepa_adversarial"
 
 runner_script:
   RUNNER_SCRIPT: "/nfs/team361/sb75/stjepa/src/app/training/train_model_lsf_mpirun_sanger.sh"

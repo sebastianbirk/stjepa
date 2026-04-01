@@ -10,15 +10,15 @@ data:
   token_dict_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/tokenizer/token_dictionary_homo_sapiens.pkl'
   tokenized_data_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/gold/cell-graph-tokenizer/hst_corpus_110m/hst_corpus_110m_32_None_None_None_None_None_shifted_log_knn_10.dataset'
   tokenizer_type: 'cell_graph'
-  precomputed_split: null
-  precomputed_n_nonzero_tokens: null
-  test_batch_ids: null
-  val_batch_ids: null
+  precomputed_split: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/tokenizer/hst_corpus_110m_32_None_None_None_None_None_shifted_log_knn_10_precomputed_split_train.pkl'
+  precomputed_n_nonzero_tokens: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/tokenizer/hst_corpus_110m_32_None_None_None_None_None_shifted_log_knn_10_n_nonzero_tokens_train.pkl'
+  test_batch_ids: ['49_batch0']
+  val_batch_ids: ['49_batch0']
   seq_len_cell: 256
   seq_len_neighborhood: 2560
   n_segments: 11
   sampling_strategy: null
-  batch_size: 256
+  batch_size: 32
   num_workers: 16
   pin_memory: True
   sep_gene_tokens_neb: False
@@ -70,8 +70,8 @@ stjepa:
 adversarial:
   labels: ['batch_value', 'assay_value']
   weight: 0.1
-  schedule_gamma: 5.0
-  hidden_dim: 128
+  schedule_gamma: 2.0
+  hidden_dim: 256
   n_classes:
     batch_value: 635
     assay_value: 5
@@ -81,7 +81,7 @@ adversarial:
 # -----------------------------------------------------------------------------
 optimization:
   warmup: 1
-  epochs: 5
+  epochs: 3
   start_lr: 2.0e-05
   lr: 6.0e-05
   final_lr: 2.0e-05
