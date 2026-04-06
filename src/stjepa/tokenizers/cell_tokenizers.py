@@ -22,7 +22,7 @@ Optional cell attributes:
 Usage
 ----------
 .. code-block :: python
-    >>> from stjepa import CellGraphTokenizer
+    >>> from nichejepa import CellGraphTokenizer
     >>> tk = CellGraphTokenizer(nproc=4)
     >>> tk.tokenize_data(
     >>>     'input_directory', 'output_directory', 'output_file_prefix')
@@ -30,7 +30,7 @@ Usage
 or
 
 .. code-block :: python
-    >>> from stjepa import CellNeighborhoodTokenizer
+    >>> from nichejepa import CellNeighborhoodTokenizer
     >>> tk = CellNeighborhoodTokenizer(nproc=4)
     >>> tk.tokenize_data(
     >>>     'input_directory', 'output_directory', 'output_file_prefix')
@@ -43,7 +43,7 @@ input file type is specified by the argument `file_format` in the
 `tokenize_data()` function. Genes should be labeled with Ensembl IDs
 (adata.var['ensembl_id']), which provide a unique identifer for
 conversion to tokens. Gene names can be converted to Ensembl IDs via the
-helper function `stjepa.datasets.utils.get_ensembl_ids()` or via the
+helper function `nichejepa.datasets.utils.get_ensembl_ids()` or via the
 pyensembl Python package. No cell metadata is required, but the cell ID
 needs to be stored in the index. Additionally, if the original '.h5ad'
 file contains a cell attribute called adata.obs['filter_pass'], this can
@@ -864,10 +864,7 @@ class CellGraphTokenizer(CellBaseTokenizer):
         del adata_dict['gene_expr_cell_neigh']
 
         # Add cell IDs for collecting metadata at inference time
-        adata_dict['cell_id'] = adata.obs['cell_id'].values.tolist()
-        
-        # Add special tokens (positional tokens and value tokens)
-        batch_id_key = f"{adata.uns['dataset_id']}_{adata.uns['batch']}"
+        adata_dict['cell_id'] = adata.obs['cell_id'].values.tolist() 
 
         #adata_dict['batch_token'] = [self.token_dict['spt_batch']] * n_cells
         #adata_dict['gene_panel_token'] = [
@@ -892,6 +889,7 @@ class CellGraphTokenizer(CellBaseTokenizer):
         # Leave space for <pad>, (optional) zero count embedding, and
         # <cls> tokens
         if self.include_special_tokens:
+            batch_id_key = f"{adata.uns['dataset_id']}_{adata.uns['batch']}"
             spv_dict = {
                 k: v for k, v in self.token_dict.items() if k.startswith('spv_')}
             spv_start_idx = min(spv_dict.values())
@@ -1412,9 +1410,6 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         #        adata.layers['X_neighborhood'].sum(axis=1).A1.tolist())]
         #adata_dict['cell_n_probed_genes'] = [adata.X.shape[1]] * n_cells
 
-        # Add special tokens (positional tokens and value tokens)
-        batch_id_key = f"{adata.uns['dataset_id']}_{adata.uns['batch']}"
-
         #adata_dict['batch_token'] = [self.token_dict['spt_batch']] * n_cells
         #adata_dict['gene_panel_token'] = [
         #    self.token_dict['spt_gene_panel']] * n_cells
@@ -1437,6 +1432,7 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         # Store values with right embedding index for count tokenizer
         # Leave space for <pad>, <mask> and <cls> tokens
         if self.include_special_tokens:
+            batch_id_key = f"{adata.uns['dataset_id']}_{adata.uns['batch']}"
             spv_dict = {
                 k: v for k, v in self.token_dict.items() if k.startswith('spv_')}
             spv_start_idx = min(spv_dict.values())
