@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
+from skmisc.loess import loess
 
 
 def normalize_by_analytic_pearson_residuals(x: sp.csr_matrix,
@@ -232,7 +233,6 @@ def normalize_by_seurat(x: sp.csr_matrix) -> sp.csr_matrix:
     gene_log_means = np.log10(gene_means[not_const])
     gene_log_variances = np.log10(gene_vars[not_const])
 
-    from skmisc.loess import loess  # optional dep: scikit-misc
     model = loess(gene_log_means,
                   gene_log_variances,
                   options={'span': 0.3, 'degree': 2})

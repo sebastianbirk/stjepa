@@ -7,18 +7,16 @@ from datetime import datetime
 import anndata as ad
 import torch
 
-from stjepa.datasets.utils import prepare_dataset
-from app.inference.infer import infer
-from stjepa.utils.config import create_params_from_YAML_wandb_config
-from stjepa.utils.distributed import init_distributed
+from src.stjepa.datasets.prepare_dataset import prepare_dataset
+from src.stjepa.infer import infer
+from src.stjepa.utils.config import create_params_from_YAML_wandb_config
+from src.stjepa.utils.distributed import init_distributed
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='Run NicheJEPA inference.')
+    parser = argparse.ArgumentParser(description='Run stjepa inference.')
     parser.add_argument('--fname', type=str, default='configs.yaml',
                         help='Name of the config file to load.')
-    parser.add_argument('--backend', type=str, default='nccl',
-                        help='Distributed backend.')
     return parser.parse_args()
 
 

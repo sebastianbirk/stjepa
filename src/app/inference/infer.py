@@ -22,9 +22,10 @@ from pyensembl import EnsemblRelease
 from scipy.sparse import issparse
 
 from app.utils import init_model, load_checkpoint
-from stjepa.datasets.cell_datasets import CellDataset
+from stjepa.datasets.cell_datasets import CellBaseDataset, init_cell_dataset
 from stjepa.datasets.dataloaders import init_dataloader_and_sampler
-from stjepa.masks.inference_collator import InferenceCollator
+from stjepa.masks.block_masking  import BlockMaskCollator
+from stjepa.masks.cell_masking import CellMaskCollator
 from stjepa.tokenizers import cell_tokenizers
 from stjepa.utils.embedding import (create_binary_selection_mask,
                                        compute_mean_unmasked_emb,
@@ -50,7 +51,7 @@ logger = logging.getLogger()
 
 @torch.inference_mode()
 def infer(args: dict,
-          dataset: CellDataset,
+          dataset: CellBaseDataset,
           load_folder_path: str,
           dataset_ids: list | None = None,
           obs_cols: list | None = None,
@@ -135,19 +136,53 @@ def infer(args: dict,
         torch.cuda.set_device(device)
 
     # Load params from config file
+    add_cls = args['meta']['add_cls']
     gt_type = args['meta']['gt_type']
-    count_encoding = args['meta'].get('count_encoding', 'value_bins')
-    n_value_bins = args['meta'].get('n_value_bins', 100)
-    cell_pos_enc = args['meta'].get('cell_pos_enc', 'segment')
+    if 'count_encoding' in args['meta'].keys():
+        count_encoding = args['meta']['count_encoding']
+    else:
+        count_encoding = 'value_bins'
+    if 'n_value_bins' in args['meta'].keys():
+        n_value_bins = args['meta']['n_value_bins']
+    else:
+        n_value_bins = 100
+    if 'cell_pos_enc' in args['meta'].keys():
+        cell_pos_enc = args['meta']['cell_pos_enc']
+    else:
+        cell_pos_enc = 'segment'
     enc_depth = args['meta']['enc_depth']
     enc_emb_dim = args['meta']['enc_emb_dim']
-    num_heads = args['meta'].get('num_heads', 8)
-    mlp_ratio = args['meta'].get('mlp_ratio', 4.0)
-    pos_learnable = args['meta'].get('pos_learnable', False)
-    special_tokens = args['meta'].get('special_tokens', [])
+    pred_depth = args['meta']['pred_depth']
+    pred_emb_dim = args['meta']['pred_emb_dim']
+    if 'num_heads' in args['meta'].keys():
+        num_heads = args['meta']['num_heads']
+    else:
+        num_heads = 8
+    if 'mlp_ratio' in args['meta'].keys():
+        mlp_ratio = args['meta']['mlp_ratio']
+    else:
+        mlp_ratio = 4.0
+    if 'predict_gene' in args['meta'].keys():
+        predict_gene = args['meta']['predict_gene']
+    else:
+        predict_gene = True
+    if 'pos_learnable' in args['meta'].keys():
+        pos_learnable = args['meta']['pos_learnable']
+    else:
+        pos_learnable = False
+    special_tokens = args['meta']['special_tokens']
     use_bfloat16 = args['meta']['use_bfloat16']
     use_flash_attention = args['meta']['use_flash_attention']
-    mlp_bias = args['meta'].get('mlp_bias', True)
+    use_layer_norm = args['meta']['use_layer_norm']
+    
+    if 'api_version' in args['meta'].keys():
+        api_version = args['meta']['api_version']
+    else:
+        api_version = 'v3'
+    if 'mlp_bias' in args['meta'].keys():
+        mlp_bias = args['meta']['mlp_bias']
+    else:
+        mlp_bias = True
 
     dataset_name = args['data']['dataset_name']
     token_dict_folder_path = args['data']['token_dict_folder_path']
@@ -159,17 +194,45 @@ def infer(args: dict,
     seq_len_cell = args['data']['seq_len_cell']
     seq_len_neighborhood = args['data']['seq_len_neighborhood']
     n_segments = args['data']['n_segments']
-    MAX_OCC = args['data']['n_segments'] - 1
+    MAX_OCC = args['data']['n_segments'] -1 
 
-    sep_gene_tokens_neb = args['data'].get('sep_gene_tokens_neb', False)
-    mega_batch_mult_max = args['data'].get('mega_batch_mult_max', 1000)
+    if 'sep_gene_tokens_neb' in args['data'].keys():
+        sep_gene_tokens_neb = args['data']['sep_gene_tokens_neb']
+    else:
+        sep_gene_tokens_neb = False
 
-    # ST-JEPA config section
-    stjepa_cfg = args.get('stjepa', {})
+    if 'nz_spc' in args['data'].keys():
+        nz_spc = args['data']['nz_spc']
+    else:
+        nz_spc = False
+
+    if 'mega_batch_mult_max' in args['data'].keys():
+        mega_batch_mult_max = args['data']['mega_batch_mult_max']
+    else:
+        mega_batch_mult_max = 1000
+
+    n_contexts = args['mask']['n_contexts']
+    n_targets = args['mask']['n_targets']
+    block_masking = args['mask']['block_masking']
+    if 'cell_masking' in args['mask'].keys():
+        cell_masking = args['mask']['cell_masking']
+    else:
+        cell_masking = False
+    context_mask_size = args['mask']['context_mask_size']
+    target_mask_size = args['mask']['target_mask_size']
+    per_block_mask_ratio = args['mask']['per_block_mask_ratio']
+    if 'restrict_special_attention' in args['meta'].keys():
+        restrict_special_attention = args['meta']['restrict_special_attention']
+    else:
+        restrict_special_attention = False
+    if 'targets_list' in args['mask'].keys():
+        targets_list = args['mask']['targets_list']
+    else:
+        targets_list = []
 
     r_file = args['state']['read_checkpoint']
     tag = args['state']['write_tag']
-
+    
     # Load token dict and get token dict-specfic params
     with open(token_dict_folder_path, 'rb') as file:
         token_dict = pickle.load(file)
@@ -178,14 +241,27 @@ def infer(args: dict,
         n_special_values = args['data']['n_special_values']
     else:
         n_special_values = sum(
-            1 for key in token_dict if "spv" in key)
+            1 for key in token_dict if "spv" in key) # this only works now because of the dummy special values
+    max_special_tokens = sum(1 for key in token_dict if "cls" in key) + sum(
+        1 for key in token_dict if "spt" in key)
 
     if agg_excluded_genes:
         agg_excluded_tokens = [
             token_dict[gene] for gene in agg_excluded_genes]
     else:
         agg_excluded_tokens = None
+    print(agg_excluded_tokens)
 
+    # Define tokenizer-specific params
+    if tokenizer_type == 'cell_neighborhood':
+        if add_cls:
+            special_tokens = ['cls_0', 'cls_1'] + special_tokens  
+    elif tokenizer_type == 'cell_graph':
+        if add_cls:
+            special_tokens = [
+                f'cls_{i}' for i in range(n_segments)] + special_tokens
+
+    # Get token sequence length and number of special tokens
     n_special_tokens = len(special_tokens)
     seq_len = seq_len_cell + seq_len_neighborhood + n_special_tokens
 
@@ -195,15 +271,20 @@ def infer(args: dict,
 
     # Set the folder for saving extracted features
     save_folder = f"{load_folder_path}/extracted_features"
+    feature_path = f"{save_folder}/"
+
     os.makedirs(save_folder, exist_ok=True)
+    dump = os.path.join(save_folder, f'params.yaml')
+    #with open(dump, 'w') as f:
+    #    yaml.dump(args, f)
 
     # Define checkpointing path
     latest_path = os.path.join(load_folder_path, f'{tag}-latest.pth.tar')
-    load_path = (os.path.join(load_folder_path, r_file) if r_file is not None
+    load_path = (os.path.join(load_folder_path, r_file) if r_file is not None 
         else latest_path)
 
-    # Initialize encoder (ST-JEPA: encoder + projection head)
-    encoder, _ = init_model(
+    # Initialize encoder, predictor, and target encoder
+    target_encoder, _ = init_model(
         gt_type=gt_type,
         count_encoding=count_encoding,
         n_value_bins=n_value_bins,
@@ -216,54 +297,88 @@ def infer(args: dict,
         n_special_values=n_special_values,
         enc_emb_dim=enc_emb_dim,
         enc_depth=enc_depth,
+        pred_emb_dim=pred_emb_dim,
+        pred_depth=pred_depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         use_flash_attention=use_flash_attention,
+        use_layer_norm=use_layer_norm,
+        api_version=api_version,
         sep_gene_tokens_neb=sep_gene_tokens_neb,
+        predict_gene=predict_gene,
         pos_learnable=pos_learnable,
-        mlp_bias=mlp_bias,
-        proj_dim=stjepa_cfg.get('proj_dim', 256),
-        proj_hidden_dim=stjepa_cfg.get('proj_hidden_dim'),
-        proj_norm=stjepa_cfg.get('proj_norm', 'bn'))
+        nz_spc=nz_spc,
+        mlp_bias=mlp_bias)
 
-    # Backbone encoder has the return_layer_emb method
-    return_layer_emb_fn = encoder.backbone.return_layer_emb
+    if api_version != 'v3':
+        return_layer_emb_fn = target_encoder.return_layer_emb
+    else:
+        return_layer_emb_fn = target_encoder.backbone.return_layer_emb
 
-    # Create inference collator (no masking, just padding-aware attention mask)
-    inference_collator = InferenceCollator()
+    # Initialize mask collator
+    if block_masking:
+       mask_collator = BlockMaskCollator(
+            n_targets=n_targets,
+            n_contexts=n_contexts,
+            n_segments=n_segments,
+            seq_len_cell=seq_len_cell,
+            seq_len_neighborhood=seq_len_neighborhood,
+            n_special_tokens=n_special_tokens,
+            per_block_mask_ratio=per_block_mask_ratio,
+            sample_segments=False,
+            sample_gene_masks=False,
+            restrict_special_attention=restrict_special_attention,
+            special_token_pad_ratio=1.0)
+    elif cell_masking:
+       mask_collator = CellMaskCollator(
+            n_targets=n_targets,
+            n_contexts=n_contexts,
+            n_segments=n_segments,
+            seq_len_cell=seq_len_cell,
+            seq_len_neighborhood=seq_len_neighborhood,
+            n_special_tokens=n_special_tokens,
+            per_block_mask_ratio=per_block_mask_ratio,
+            targets_list=targets_list)
 
-    # Initialize dataset and dataloader
-    cell_dataset = CellDataset(
+    # Initialize train and test datasets, dataloaders and samplers
+    cell_dataset = init_cell_dataset(
         dataset=dataset,
         vocab_size=vocab_size,
         seq_len_cell=seq_len_cell,
         seq_len_neighborhood=seq_len_neighborhood,
+        tokenizer_type=tokenizer_type,
         gt_type=gt_type,
         cell_pos_enc=cell_pos_enc,
         special_tokens=special_tokens,
         sampling_strategy=None,
         n_nonzero_tokens_list=[],
         include_cell_id=True,
-        sep_gene_tokens_neb=sep_gene_tokens_neb)
+        sep_gene_tokens_neb=sep_gene_tokens_neb,
+        nz_spc=nz_spc)
 
     loader, _ = init_dataloader_and_sampler(
         cell_dataset=cell_dataset,
         batch_size=batch_size,
-        use_length_grouped_sampler=False,
+        distributed=False,
         world_size=1,
         rank=0,
-        collate_fn=inference_collator,
+        collate_fn=mask_collator,
         pin_memory=pin_memory,
         num_workers=num_workers,
         drop_last=False,
         persistent_workers=False,
         mega_batch_mult_max=mega_batch_mult_max)
-
-    encoder, _ = load_checkpoint(
-        device=device,
-        r_path=load_path,
-        encoder=encoder)
-    encoder.eval()
+    
+    _, _, target_encoder, _, _, start_epoch, _ = load_checkpoint(
+            device=device,
+            r_path=load_path,
+            encoder=None,
+            predictor=None,
+            target_encoder=target_encoder,
+            opt=None,
+            scaler=None,
+            is_training=False)
+    target_encoder.eval()
 
     # Retrieve embeddings
     all_cell_ids = []
@@ -281,7 +396,7 @@ def infer(args: dict,
     emd_list = []
 
 
-    for itr, (udata, masks_attention) in tqdm(enumerate(loader)):
+    for itr, (udata, _, _, masks_attention, pad_special_tokens) in tqdm(enumerate(loader)):
         for key in udata.keys():
             if key != 'cell_id':
                 udata[key] = udata[key].to(device, non_blocking=True)

@@ -1,4 +1,6 @@
+import gc
 import math
+import time
 from collections.abc import Iterator
 from logging import getLogger
 
@@ -7,7 +9,7 @@ import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from .cell_datasets import CellDataset
+from .cell_datasets import CellBaseDataset
 
 
 logger = getLogger()
@@ -42,7 +44,7 @@ class CustomDistributedLengthGroupedSampler(DistributedSampler):
         Parameters
         -----------
         cell_dataset:
-            CellDataset.
+            CellGraphDataset or CellNeighborhoodDataset.
         batch_size:
             Batch size for the dataloader and -sampler.
         num_replicas:
@@ -176,9 +178,9 @@ class CustomDistributedLengthGroupedSampler(DistributedSampler):
         return indices
 
 
-def init_dataloader_and_sampler(cell_dataset: CellDataset,
+def init_dataloader_and_sampler(cell_dataset: CellBaseDataset,
                                 batch_size: int,
-                                use_length_grouped_sampler: bool,
+                                distributed: bool,
                                 world_size: int,
                                 rank: int,
                                 mega_batch_mult_max: int,
@@ -191,14 +193,11 @@ def init_dataloader_and_sampler(cell_dataset: CellDataset,
     Parameters
     -----------
     cell_dataset:
-        CellDataset.
+        CellGraphDataset or CellNeighborhoodDataset.
     batch_size:
         Batch size for the dataloader and -sampler.
-    use_length_grouped_sampler:
-        If ``True``, use ``CustomDistributedLengthGroupedSampler``
-        which groups cells of similar non-zero token counts into the
-        same batches (reduces padding waste).  If ``False``, use a
-        plain ``DistributedSampler`` without length grouping.
+    distributed:
+        If `True`, use distributed mode.
     world_size:
         Number of replicas of the distributed sampler.
     rank:
@@ -210,10 +209,10 @@ def init_dataloader_and_sampler(cell_dataset: CellDataset,
     --------
     data_loader:
         Torch dataloader.
-    dist_sampler:
+    dist_sampler (optional):
         Torch distributed sampler.
     """
-    if use_length_grouped_sampler:
+    if distributed:
         dist_sampler = CustomDistributedLengthGroupedSampler(
             cell_dataset=cell_dataset,
             batch_size=batch_size,

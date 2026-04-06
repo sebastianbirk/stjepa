@@ -1,10 +1,9 @@
 """
-Helper functions for ST-JEPA model initialisation and training on spatial
-transcriptomics data.
-
-Adapted from Quillent, A., Bourdoukan, R. & Löwe, S.  ST-JEPA: Provable
-and Scalable Self-Supervised Learning Without the Heuristics.
-arXiv:2502.01048 (2025).
+Adapted from Assran, M. et al. Self-supervised learning from images with
+a Joint-Embedding Predictive Architecture. Proc. IEEE Comput. Soc. Conf.
+Comput. Vis. Pattern Recognit. 15619–15629 (2023);
+https://github.com/facebookresearch/ijepa/blob/main/src/helper.py
+(05.06.2024).
 """
 
 import logging
@@ -12,10 +11,11 @@ import sys
 from typing import Literal
 
 import torch
-import torch.nn as nn
+#from peft import get_peft_model, LoraConfig
 
 import stjepa.models.gene_transformers as gt
-from stjepa.models.multimask import EncoderMultiMaskWrapper
+from stjepa.models.multimask import (EncoderMultiMaskWrapper,
+                                        PredictorMultiMaskWrapper)
 from stjepa.models.utils import trunc_normal_
 from stjepa.utils.schedulers import (CosineWDSchedule,
                                         WarmupCosineSchedule)
@@ -24,332 +24,368 @@ from stjepa.utils.schedulers import (CosineWDSchedule,
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
 
+"""
+def apply_peft(model, peft_method='lora', rank=8):
+    if peft_method == 'lora':
+        peft_config = LoraConfig(r=rank)
+        model = get_peft_model(model, peft_config)
+    return model
+"""
 
-# ---------------------------------------------------------------------------
-# ST-JEPA-specific helpers
-# ---------------------------------------------------------------------------
-
-class ProjectionHead(nn.Module):
+def load_checkpoint(device: str,
+                    r_path: str,
+                    encoder: gt.GeneTransformerBaseEncoder,
+                    predictor: gt.GeneTransformerBasePredictor,
+                    target_encoder: gt.GeneTransformerBaseEncoder,
+                    opt: torch.optim.AdamW,
+                    scaler: torch.cuda.amp.GradScaler,
+                    is_training: bool = True,
+                    ) -> tuple[gt.GeneTransformerBaseEncoder,
+                               gt.GeneTransformerBasePredictor,
+                               gt.GeneTransformerBaseEncoder,
+                               torch.optim.AdamW,
+                               torch.cuda.amp.GradScaler,
+                               int]:
     """
-    3-layer MLP projection head used in ST-JEPA.
-
-    Maps encoder pooled representations (shape ``[B, in_dim]``) to a
-    lower-dimensional projection space (shape ``[B, proj_dim]``) via two
-    hidden layers with optional normalisation and GELU activations.
+    Load model checkpoint from stored file.
 
     Parameters
-    ----------
-    in_dim:
-        Input dimension (encoder embedding size).
-    hidden_dim:
-        Hidden layer width.  Defaults to 4 × in_dim.
-    proj_dim:
-        Output projection dimension.
-    norm:
-        Normalisation layer to apply after each hidden linear layer.
-        ``'bn'`` → ``BatchNorm1d`` (convert to SyncBatchNorm for DDP),
-        ``'ln'`` → ``LayerNorm``,  ``'none'`` → no normalisation.
-    """
-
-    def __init__(
-        self,
-        in_dim: int,
-        proj_dim: int,
-        hidden_dim: int | None = None,
-        norm: Literal["bn", "ln", "none"] = "ln",
-    ):
-        super().__init__()
-        hidden_dim = hidden_dim or (in_dim * 4)
-
-        def _norm_layer(dim: int) -> nn.Module:
-            if norm == "bn":
-                return nn.BatchNorm1d(dim)
-            elif norm == "ln":
-                return nn.LayerNorm(dim)
-            else:
-                return nn.Identity()
-
-        self.layers = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim, bias=(norm != "bn")),
-            _norm_layer(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim, bias=(norm != "bn")),
-            _norm_layer(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, proj_dim, bias=True),
-        )
-
-        # Weight initialisation
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, (nn.BatchNorm1d, nn.LayerNorm)):
-                nn.init.constant_(m.weight, 1.0)
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
-
-
-def init_stjepa_model(
-    gt_type: Literal["rank", "counts", "combined"],
-    count_encoding: Literal["value_bins", "mlp"],
-    n_value_bins: int,
-    cell_pos_enc: Literal["segment", "coord"],
-    device: str,
-    vocab_size: int,
-    seq_len: int,
-    n_segments: int,
-    proj_dim: int,
-    enc_emb_dim: int = 768,
-    enc_depth: int = 12,
-    proj_hidden_dim: int | None = None,
-    proj_norm: Literal["bn", "ln", "none"] = "ln",
-    num_heads: int = 8,
-    mlp_ratio: float = 4.0,
-    use_flash_attention: bool = True,
-    sep_gene_tokens_neb: bool = False,
-    pos_learnable: bool = False,
-    mlp_bias: bool = False,
-) -> tuple[EncoderMultiMaskWrapper, "ProjectionHead"]:
-    """
-    Initialise the ST-JEPA encoder and projection head.
-
-    ST-JEPA is a single-network, no-EMA method: only an encoder and a
-    projection head are created (no predictor, no target encoder).
+    -----------
+    device:
+        Device where the checkpoint will be loaded to.
+    r_path:
+        Path to the stored checkpoint to be loaded.
+    encoder:
+        Initialized GeneTransformerEncoder module to encode contexts.
+    predictor:
+        Initialized GeneTransformerPredictor module to predict targets
+        from contexts.
+    target_encoder:
+        Initialized GeneTransformerEncoder module to encode targets.
+    opt:
+        Torch optimizer.
+    scaler:
+        Torch scaler for automatic mixed precision training.
+    is_training:
+        If 'True', load state dict into DDP module.
 
     Returns
-    -------
+    -----------
     encoder:
-        ``EncoderMultiMaskWrapper``-wrapped gene transformer encoder.
-    proj_head:
-        ``ProjectionHead`` MLP that maps pooled encoder outputs to the
-        projection space.
+        GeneTransformerEncoder module to encode contexts, loaded with
+        state from checkpoint.
+    predictor:
+        GeneTransformerPredictor module to predict targets from
+        contexts, loaded with state from checkpoint.
+    target_encoder:
+        GeneTransformerEncoder module to encode targets, loaded with
+        state from checkpoint.
+    opt:
+        Torch optimizer, loaded with stete from checkpoint.
+    scaler:
+        Torch scaler for automatic mixed precision training, loaded with
+        state from checkpoint.
+    epoch:
+        Number of epochs from checkpoint.
+    """
+    try:
+        checkpoint = torch.load(
+            r_path, map_location=torch.device(device))
+        
+        if ('zero_epoch_tracking' in checkpoint.keys()) and not ('iter_number' in checkpoint.keys()):
+            epoch = checkpoint['epoch'] + 1
+        else: # just for backwards compatibility
+            epoch = checkpoint['epoch']
+
+        # TO DO: Update
+        if 'iter_number' in checkpoint.keys():
+            iter_number = checkpoint['iter_number']
+        else:
+            iter_number = None
+
+        # Load state into context encoder
+        if encoder is not None:
+            pretrained_dict = checkpoint['encoder']
+            msg = encoder.load_state_dict(pretrained_dict)
+            logger.info(
+                f'Loaded pretrained encoder from epoch {epoch} with msg: {msg}.')
+
+        # Load state into predictor
+        if predictor is not None:
+            pretrained_dict = checkpoint['predictor']
+            msg = predictor.load_state_dict(pretrained_dict)
+            logger.info(
+                f'Loaded pretrained predictor from epoch {epoch} with msg: {msg}.')
+
+        # Load state into target encoder
+        if target_encoder is not None:
+            print(list(checkpoint.keys()))
+            pretrained_dict = checkpoint['target_encoder']
+            if not is_training:
+                pretrained_dict = {
+                    key.replace("module.", ""): value for key, value in 
+                    pretrained_dict.items()}
+            msg = target_encoder.load_state_dict(pretrained_dict)
+            logger.info(
+                f'Loaded pretrained target encoder from epoch {epoch} with msg:'
+                f' {msg}.')
+
+        # Load state into optimizer
+        if opt is not None:
+            opt.load_state_dict(checkpoint['opt'])
+            logger.info(f'Loaded optimizer from epoch {epoch}.')
+        if scaler is not None:
+            scaler.load_state_dict(checkpoint['scaler'])
+            logger.info(f'Loaded scaler from epoch {epoch}.')
+        
+        logger.info(f'Finished loading checkpoint with read path: {r_path}.')
+        del checkpoint
+
+    except Exception as e:
+        logger.info(f'Encountered exception when loading checkpoint: {e}.')
+        epoch = 0
+        iter_number = None
+
+    return encoder, predictor, target_encoder, opt, scaler, epoch, iter_number
+
+
+def init_model(gt_type: Literal['rank', 'count', 'combined'],
+               count_encoding: Literal['value_bins', 'mlp'],
+               n_value_bins: int,
+               cell_pos_enc: Literal['segment', 'coord'],
+               device: str,
+               vocab_size: int,
+               seq_len: int,
+               n_special_tokens: int,
+               n_segments: int,
+               n_special_values: int | None = None,
+               enc_emb_dim: int = 768, 
+               enc_depth: int = 12,
+               pred_emb_dim: int = 384,
+               pred_depth: int = 6,
+               num_heads: int = 8,
+               mlp_ratio: float = 4.0,
+               use_flash_attention: bool = True,
+               use_layer_norm: bool = True,
+               api_version: Literal['v1', 'v2', 'v3'] = 'v4',
+               sep_gene_tokens_neb: bool = False,
+               predict_gene: bool = True,
+               pos_learnable: bool = False,
+               nz_spc: bool = False,
+               new_spc: bool = False,
+               mlp_bias: bool = False,
+               ) -> tuple[gt.GeneTransformerBaseEncoder,
+                          gt.GeneTransformerBasePredictor]:
+    """
+    Initialize model.
+
+    Parameters
+    -----------
+    gt_type:
+        Gene transformer type.
+    count_encoding:
+        How counts are encoded.
+    n_value_bins:
+        Number of value bins if `value_bin` count encoding is used.
+    cell_pos_enc:
+        How cell positions are encoded.
+    device:
+        Device on which the model will be initialized.
+    vocab_size:
+        Size of the token vocabulary. Includes <pad> token.
+    seq_len:
+        Length of the token sequences (w/o <cls> token).
+    n_special_tokens:
+        Number of special tokens.
+    n_segments:
+        Number of segments.
+    n_special_values:
+        Number of special values.
+    enc_emb_dim:
+        Dimension of the encoder embedding.
+    enc_depth:
+        Number of transformer blocks in the encoder.
+    pred_emb_dim:
+        Dimension of the predictor embedding.        
+    pred_depth:
+        Number of transformer blocks in the predictor.
+    use_flash_attention:
+        If `True` use flash_attention.
+    use_layer_norm:
+        If `True` use layer norm, else Dynamic Tanh.
+    sep_gene_tokens_neb:
+        If `True`, use separate gene tokens for neighborhood.
+    predict_gene:
+        If `True`, predict gene given rank, otherwise predict rank given
+        gene.
+
+    Returns
+    -----------
+    encoder:
+        Initialized GeneTransformerEncoder module.
+    predictor:
+        Initialized GeneTransformerPredictor module.
     """
     encoder = gt.__dict__["init_gt_encoder"](
         encoder_type=gt_type,
+        n_special_values=n_special_values,
         count_encoding=count_encoding,
         n_value_bins=n_value_bins,
         cell_pos_enc=cell_pos_enc,
         vocab_size=vocab_size,
         seq_len=seq_len,
+        n_special_tokens=n_special_tokens,
         n_segments=n_segments,
         embed_dim=enc_emb_dim,
         depth=enc_depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         use_flash_attention=use_flash_attention,
+        use_layer_norm=use_layer_norm,
+        api_version=api_version,
         sep_gene_tokens_neb=sep_gene_tokens_neb,
         pos_learnable=pos_learnable,
-        mlp_bias=mlp_bias,
-    )
-    encoder = EncoderMultiMaskWrapper(encoder)
+        nz_spc=nz_spc,
+        mlp_bias=mlp_bias)
+    if api_version == 'v3' or api_version == 'v4':
+        encoder = EncoderMultiMaskWrapper(encoder)
+    predictor = gt.__dict__["init_gt_predictor"](
+        predictor_type=gt_type,
+        n_special_values=n_special_values,
+        embed_dim=enc_emb_dim,
+        seq_len=seq_len,
+        n_special_tokens=n_special_tokens,
+        n_segments=n_segments,
+        cell_pos_enc=cell_pos_enc,
+        predictor_embed_dim=pred_emb_dim,
+        depth=pred_depth,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+        use_flash_attention=use_flash_attention,
+        use_layer_norm=use_layer_norm,
+        api_version=api_version,
+        predict_gene=predict_gene,
+        pos_learnable=pos_learnable,
+        nz_spc=nz_spc,
+        new_spc=new_spc)
+    if api_version == 'v3' or api_version == 'v4':
+        predictor = PredictorMultiMaskWrapper(predictor)
 
-    proj_head = ProjectionHead(
-        in_dim=enc_emb_dim,
-        proj_dim=proj_dim,
-        hidden_dim=proj_hidden_dim,
-        norm=proj_norm,
-    )
-
-    # Weight initialisation (encoder)
-    def _init_weights(m: nn.Module):
-        if isinstance(m, nn.Linear):
+    def init_weights(m):
+        if isinstance(m, torch.nn.Linear):
             trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
+                torch.nn.init.constant_(m.bias, 0)
+        elif isinstance(m, torch.nn.LayerNorm):
+            torch.nn.init.constant_(m.bias, 0)
+            torch.nn.init.constant_(m.weight, 1.0)
 
     for m in encoder.modules():
-        _init_weights(m)
+        init_weights(m)
+
+    for m in predictor.modules():
+        init_weights(m)
 
     encoder.to(device)
-    proj_head.to(device)
-
+    predictor.to(device)
     logger.info(encoder)
-    logger.info(proj_head)
+    logger.info(predictor)
 
-    def _count_params(model: nn.Module) -> int:
+    def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    logger.info(f"ST-JEPA encoder parameters: {_count_params(encoder):,}")
-    logger.info(f"ST-JEPA projection head parameters: {_count_params(proj_head):,}")
+    logger.info(f'Encoder number of parameters: {count_parameters(encoder)}')
+    logger.info(
+        f'Predictor number of parameters: {count_parameters(predictor)}')
+    
+    return encoder, predictor
 
-    return encoder, proj_head
-
-
-def init_stjepa_opt(
-    encoder: nn.Module,
-    proj_head: nn.Module,
-    iterations_per_epoch: int,
-    start_lr: float,
-    ref_lr: float,
-    warmup: int,
-    num_epochs: int,
-    wd: float = 1e-6,
-    final_wd: float = 1e-6,
-    final_lr: float = 0.0,
-    use_bfloat16: bool = False,
-    ipe_scale: float = 1.25,
-    extra_params: list | None = None,
-) -> tuple[torch.optim.AdamW, None, WarmupCosineSchedule, CosineWDSchedule]:
+    
+def init_opt(encoder: gt.GeneTransformerBaseEncoder,
+             predictor: gt.GeneTransformerBasePredictor,
+             iterations_per_epoch: int,
+             start_lr: float,
+             ref_lr: float,
+             warmup: int,
+             num_epochs: int,
+             wd: float = 1e-6,
+             final_wd: float = 1e-6,
+             final_lr: float = 0.0,
+             use_bfloat16: bool = False,
+             ipe_scale: float = 1.25,
+             api_version: Literal['v1', 'v2', 'v3', 'v4'] = 'v4',
+             ) -> tuple[torch.optim.AdamW,
+                        torch.cuda.amp.GradScaler,
+                        WarmupCosineSchedule,
+                        CosineWDSchedule]:
     """
-    Initialise the AdamW optimiser and cosine LR / WD schedulers for
-    ST-JEPA training (encoder + projection head jointly).
+    Initialize optimizer, learning rate scheduler, weight decay scheduler, and
+    automatic mixed precision scaler.
 
     Parameters
-    ----------
-    extra_params:
-        Optional list of additional parameter groups (e.g. adversarial
-        heads) to include in the optimiser.
+    -----------
+    encoder:
+    predictor:
+    iterations_per_epoch:
+    start_lr:
+    ref_lr:
+    warmup:
+    num_epochs:
+    wd:
+    final_wd:
+    final_lr:
+    use_bfloat16:
+    ipe_scale:
+    api_version:
 
     Returns
-    -------
-    optimizer, scaler (always None for bfloat16), scheduler, wd_scheduler
+    -----------
+    optimizer:
+    scaler:
+    scheduler:
+    wd_scheduler:    
     """
-    all_named = (
-        list(encoder.named_parameters())
-        + list(proj_head.named_parameters())
-    )
-    if extra_params:
-        for extra_module in extra_params:
-            all_named += list(extra_module.named_parameters())
+    param_groups = [{'params': (p for n, p in encoder.named_parameters()
+                                if ('bias' not in n) and (len(p.shape) != 1))},
+                    {'params': (p for n, p in predictor.named_parameters()
+                                if ('bias' not in n) and (len(p.shape) != 1))},
+                    {'params': (p for n, p in encoder.named_parameters()
+                                if ('bias' in n) or (len(p.shape) == 1)),
+                     'WD_exclude': True,
+                     'weight_decay': 0},
+                    {'params': (p for n, p in predictor.named_parameters()
+                                if ('bias' in n) or (len(p.shape) == 1)),
+                     'WD_exclude': True,
+                     'weight_decay': 0}]
 
-    param_groups = [
-        {
-            "params": [
-                p for n, p in all_named
-                if ("bias" not in n) and (len(p.shape) != 1)
-            ]
-        },
-        {
-            "params": [
-                p for n, p in all_named
-                if ("bias" in n) or (len(p.shape) == 1)
-            ],
-            "WD_exclude": True,
-            "weight_decay": 0,
-        },
-    ]
-
-    logger.info("ST-JEPA: initialising optimiser: AdamW.")
+    # Initialize optimizer with decoupled weight decay
+    logger.info('Initializing optimizer: AdamW.')
     optimizer = torch.optim.AdamW(param_groups, fused=True)
 
-    logger.info("ST-JEPA: initialising LR scheduler: WarmupCosineSchedule.")
+    # Initialize learning rate scheduler
+    logger.info('Initializing learning rate scheduler: WarmupCosineSchedule.')
     scheduler = WarmupCosineSchedule(
         optimizer,
-        warmup_steps=int(warmup * iterations_per_epoch),
+        warmup_steps=int(warmup*iterations_per_epoch),
         start_lr=start_lr,
         ref_lr=ref_lr,
         final_lr=final_lr,
-        T_max=int(ipe_scale * num_epochs * iterations_per_epoch),
-    )
-
-    logger.info("ST-JEPA: initialising WD scheduler: CosineWDSchedule.")
+        T_max=int(ipe_scale*num_epochs*iterations_per_epoch))
+    
+    # Initialize weight decay scheduler
+    logger.info('Initializing weight decay scheduler: CosineWDSchedule.')
     wd_scheduler = CosineWDSchedule(
         optimizer,
         ref_wd=wd,
         final_wd=final_wd,
-        T_max=int(ipe_scale * num_epochs * iterations_per_epoch),
-    )
-
-    scaler = None
-
+        T_max=int(ipe_scale*num_epochs*iterations_per_epoch))
+    
+    # Initialize gradient scaler for automatic mixed precision training to
+    # increase the loss magnitude, ensuring gradients are large enough to be
+    # represented in FP16
+    logger.info('Initializing automatic mixed precision training scaler: '
+                'GradScaler.')
+    #scaler = torch.cuda.amp.GradScaler() if use_bfloat16 else None
+    scaler = None # GradScaler should not be used for bfloat16
+    
     return optimizer, scaler, scheduler, wd_scheduler
-
-
-# ---------------------------------------------------------------------------
-# Inference-oriented wrappers
-# ---------------------------------------------------------------------------
-
-def init_model(
-    gt_type: str,
-    count_encoding: str,
-    n_value_bins: int,
-    cell_pos_enc: str,
-    device: str,
-    vocab_size: int,
-    seq_len: int,
-    n_segments: int,
-    enc_emb_dim: int = 768,
-    enc_depth: int = 12,
-    num_heads: int = 8,
-    mlp_ratio: float = 4.0,
-    use_flash_attention: bool = True,
-    sep_gene_tokens_neb: bool = False,
-    pos_learnable: bool = False,
-    mlp_bias: bool = False,
-    proj_dim: int = 256,
-    proj_hidden_dim: int | None = None,
-    proj_norm: Literal["bn", "ln", "none"] = "ln",
-) -> tuple[EncoderMultiMaskWrapper, "ProjectionHead"]:
-    """
-    High-level model factory used by inference scripts.
-
-    Thin wrapper around :func:`init_stjepa_model` that keeps the call
-    signature expected by existing inference code.
-    """
-    return init_stjepa_model(
-        gt_type=gt_type,
-        count_encoding=count_encoding,
-        n_value_bins=n_value_bins,
-        cell_pos_enc=cell_pos_enc,
-        device=device,
-        vocab_size=vocab_size,
-        seq_len=seq_len,
-        n_segments=n_segments,
-        proj_dim=proj_dim,
-        enc_emb_dim=enc_emb_dim,
-        enc_depth=enc_depth,
-        proj_hidden_dim=proj_hidden_dim,
-        proj_norm=proj_norm,
-        num_heads=num_heads,
-        mlp_ratio=mlp_ratio,
-        use_flash_attention=use_flash_attention,
-        sep_gene_tokens_neb=sep_gene_tokens_neb,
-        pos_learnable=pos_learnable,
-        mlp_bias=mlp_bias,
-    )
-
-
-def load_checkpoint(
-    device: str | torch.device,
-    r_path: str,
-    encoder: nn.Module | None = None,
-    opt: torch.optim.Optimizer | None = None,
-    proj_head: nn.Module | None = None,
-) -> tuple[nn.Module | None, int]:
-    """
-    Load an ST-JEPA checkpoint.
-
-    Handles the common case where the checkpoint was saved under DDP
-    (state-dict keys prefixed with ``module.``): the prefix is stripped
-    automatically if the target model is **not** wrapped in DDP.
-    """
-    ckpt = torch.load(r_path, map_location=device)
-
-    def _maybe_strip_ddp(state_dict: dict) -> dict:
-        """Remove ``module.`` prefix added by DistributedDataParallel."""
-        if any(k.startswith("module.") for k in state_dict):
-            return {k.removeprefix("module."): v for k, v in state_dict.items()}
-        return state_dict
-
-    if encoder is not None and "encoder" in ckpt:
-        encoder.load_state_dict(_maybe_strip_ddp(ckpt["encoder"]))
-        logger.info(f"Loaded encoder weights.")
-
-    if proj_head is not None and "proj_head" in ckpt:
-        proj_head.load_state_dict(_maybe_strip_ddp(ckpt["proj_head"]))
-        logger.info(f"Loaded projection head weights.")
-
-    if opt is not None and "opt" in ckpt:
-        opt.load_state_dict(ckpt["opt"])
-        logger.info(f"Loaded optimizer.")
-
-    epoch = ckpt.get("epoch", 0)
-    logger.info(f"Checkpoint loaded from '{r_path}' — epoch {epoch}.")
-    return encoder, epoch

@@ -21,7 +21,21 @@ from tqdm import tqdm
 from pyensembl import EnsemblRelease
 from scipy.sparse import issparse
 
+from app.utils import init_model, load_checkpoint
+from stjepa.datasets.cell_datasets import CellBaseDataset, init_cell_dataset
+from stjepa.datasets.dataloaders import init_dataloader_and_sampler
+from stjepa.masks.block_masking  import BlockMaskCollator
+from stjepa.masks.cell_masking import CellMaskCollator
 from stjepa.tokenizers import cell_tokenizers
+from stjepa.utils.embedding import (create_binary_selection_mask,
+                                       compute_mean_unmasked_emb,
+                                       compute_unmasked_rank_based_weights,
+                                       collect_adata_from_folder,
+                                       retrieve_gene_emb,
+                                       compute_count_mean_cosine_sim,
+                                       compute_sum_and_nonzero_count,
+                                       batch_rowwise_distances)
+from stjepa.utils.logging import CSVLogger
 from typing import Dict, List
 
 
@@ -165,21 +179,7 @@ def harmonize_adata(adata: ad.AnnData,
     print(f"After gene filtering: {n_genes_after} genes "
           f"(removed {n_genes_before - n_genes_after} genes).")
 
-    # Add dummy values as special values
-    print('==================================================')
-    print('STEP 4: ADDING SPECIAL VALUES...')
-    print('==================================================')
     if 'cell_id' not in adata.obs.keys():
         adata.obs['cell_id'] = adata.obs_names
-    if 'dataset_id' not in adata.uns.keys():
-        adata.uns['dataset_id'] = 14  # just dummy value to prevent errors
-    if 'batch' not in adata.uns.keys():
-        adata.uns['batch'] = 'batch0' # just dummy value to prevent errors
-    if 'assay' not in adata.uns.keys():
-        adata.uns['assay'] = 'xenium' # just dummy value to prevent errors
-    if 'species' not in adata.uns.keys():
-        adata.uns['species'] = 'homo_sapiens' # just dummy value to prevent errors
-    if 'tissue' not in adata.uns.keys():
-        adata.uns['tissue'] = 'lung' # just dummy value to prevent errors
 
     return adata

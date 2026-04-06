@@ -5,6 +5,8 @@ https://github.com/facebookresearch/jepa/blob/main/src/models/utils/multimask.py
 (25.03.2025).
 """
 
+from typing import Literal
+
 import torch
 import torch.nn as nn
 
@@ -13,10 +15,6 @@ class EncoderMultiMaskWrapper(nn.Module):
     """
     EncoderMultiMaskWrapper class for encoding iteratively with multiple
     masks.
-
-    In ST-JEPA this is used to encode V independent views in a single
-    ``forward`` call: pass a list of V masks and receive a list of V
-    embedding tensors back.
 
     Parameters
     ----------
@@ -47,3 +45,46 @@ class EncoderMultiMaskWrapper(nn.Module):
                                          masks_attention=masks_attention)
             outs.append(x)
         return outs, token_emb
+
+
+class PredictorMultiMaskWrapper(nn.Module):
+    """
+    PredictorMultiMaskWrapper class for predicting iteratively with
+    multiple masks.
+
+    Only works with a single context/encoder mask.
+
+    Parameters
+    ----------
+    backbone:
+        The predictor backbone network.
+    """
+    def __init__(self, backbone: nn.Module):
+        super().__init__()
+        self.backbone = backbone
+
+    def forward(self,
+                z: torch.Tensor | list,
+                token_emb: torch.Tensor,
+                batch: dict[torch.Tensor],
+                masks_enc: torch.Tensor | list,
+                masks_pred: torch.Tensor | list,
+                masks_attention: torch.Tensor
+                ) -> list[torch.Tensor]:
+        if type(z) is not list:
+            z = [z]
+        if type(masks_enc) is not list:
+            masks_enc = [masks_enc]
+        if type(masks_pred) is not list:
+            masks_pred = [masks_pred]
+
+        outs = []
+        for mp in masks_pred:
+            outs += [
+                self.backbone(z=z[0],
+                              token_emb=token_emb,
+                              batch=batch,
+                              masks_enc=masks_enc[0],
+                              masks_pred=mp,
+                              masks_attention=masks_attention)]
+        return outs
