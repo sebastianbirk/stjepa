@@ -1264,7 +1264,14 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
         token_emb = self.token_embed(batch['tokens'])
         pos_emb = self.pos_embed(batch['positions'])
         seg_emb = self._get_seg_emb(batch)
-        
+
+        torch.set_printoptions(profile="full")
+        #print(batch)
+        #print(batch['tokens'][0])
+        #print(batch['positions'][0])
+        #print(batch['segments'][0])
+        #print(batch['values'][0])
+
         if DEBUG:
             proportion_zero = (batch['tokens'] == 0).float().mean()
             print("Proportion of zero tokens:", proportion_zero)
