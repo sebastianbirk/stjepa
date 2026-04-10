@@ -288,7 +288,7 @@ def embed_dataset(dataset: Dataset,
         #raise ValueError
 
         # Create mask for neighbor cell genes
-        if model_config['data']['tokenizer_type'] == 'cell_neighborhood':
+        if model_config['data']['tokenizer_type'] == 'cell_neigh':
             neighborhood_mask = create_binary_selection_mask(
                 ns_tokens,
                 selection_type="agg_neighborhood",
@@ -383,6 +383,7 @@ def harmonize_tokenize_embed_pipeline(
         use_generator: bool = True,
         add_neigh_cell_ids: bool = False,
         ignore_spc_tokens: bool = True,
+        agg_type: Literal['avg', 'softmax'] = 'avg',
         ) -> ad.AnnData:
     """
     Harmonize, tokenize and embed an AnnData object.
@@ -556,7 +557,8 @@ def harmonize_tokenize_embed_pipeline(
         batch_size=batch_size,
         pin_memory=pin_memory,
         num_workers=num_workers,
-        ignore_spc_tokens=ignore_spc_tokens)
+        ignore_spc_tokens=ignore_spc_tokens,
+        agg_type=agg_type)
     print(f"Embedded tokenized data.")
 
     # Add embeddings to adata

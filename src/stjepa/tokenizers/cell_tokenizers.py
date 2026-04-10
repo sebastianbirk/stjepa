@@ -22,7 +22,7 @@ Optional cell attributes:
 Usage
 ----------
 .. code-block :: python
-    >>> from stjepa import CellGraphTokenizer
+    >>> from nichejepa import CellGraphTokenizer
     >>> tk = CellGraphTokenizer(nproc=4)
     >>> tk.tokenize_data(
     >>>     'input_directory', 'output_directory', 'output_file_prefix')
@@ -30,7 +30,7 @@ Usage
 or
 
 .. code-block :: python
-    >>> from stjepa import CellNeighborhoodTokenizer
+    >>> from nichejepa import CellNeighborhoodTokenizer
     >>> tk = CellNeighborhoodTokenizer(nproc=4)
     >>> tk.tokenize_data(
     >>>     'input_directory', 'output_directory', 'output_file_prefix')
@@ -43,7 +43,7 @@ input file type is specified by the argument `file_format` in the
 `tokenize_data()` function. Genes should be labeled with Ensembl IDs
 (adata.var['ensembl_id']), which provide a unique identifer for
 conversion to tokens. Gene names can be converted to Ensembl IDs via the
-helper function `stjepa.datasets.utils.get_ensembl_ids()` or via the
+helper function `nichejepa.datasets.utils.get_ensembl_ids()` or via the
 pyensembl Python package. No cell metadata is required, but the cell ID
 needs to be stored in the index. Additionally, if the original '.h5ad'
 file contains a cell attribute called adata.obs['filter_pass'], this can
@@ -1064,6 +1064,8 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         ----------
         adata_file_path:
             Path to anndata file containing cells to be tokenized.
+        adata:
+            AnnData object to be tokenized.
 
         Returns
         ----------
@@ -1097,8 +1099,17 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         # Initialize dict to collect tokens and cell ids
         adata_dict = {}
 
+        # Read batch
         if adata is None:
-            adata = ad.read_h5ad(adata_file_path)
+            if adata_file_path is not None:
+                adata = ad.read_h5ad(adata_file_path)
+            else:
+                raise ValueError(
+                    'Specify either `adata` or `adata_file_path`.')
+        else:
+            if adata_file_path is not None:
+                raise ValueError(
+                    'Specify either `adata` or `adata_file_path`, not both.')
 
         print('Filtering cells.')
         # Filter to remove poor quality cells
@@ -1133,7 +1144,7 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
                 adata.X,
                 cell_areas=adata.obs['cell_area'].values)
             adata.layers['X_neighborhood_rank'] = normalize_by_cell_area(
-                adata.X,
+                adata.layers['X_neighborhood'],
                 cell_areas=adata.obs['neighborhood_cell_area'].values)
         else:
             if self.rank_cell_norm_method is None:
@@ -1261,6 +1272,8 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         elif self.count_gene_norm_method == 'seurat_v3':
             adata.layers['X_count'] = normalize_by_seurat(
                 adata.layers['X_count'])
+            adata.layers['X_neighborhood_count'] = normalize_by_seurat(
+                adata.layers['X_neighborhood_count'])
         else:
             if self.count_gene_norm_method is None:
                 pass
@@ -1332,70 +1345,163 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         adata_dict['gene_expr_neighborhood'] = []
             
         # Divide cells into chunks and loop through chunks
-        print('Ranking gene tokens based on normalized counts.')
-        for i in range(0, len(adata), self.chunk_size):
-            if self.include_zero_expr_genes:
-                norm_counts_cell_rank = adata[
-                    i : i + self.chunk_size, coding_miRNA_idx].layers['X_rank'].toarray()
-                norm_counts_neighborhood_rank = adata[
-                    i : i + self.chunk_size, coding_miRNA_idx].layers[
-                        'X_neighborhood_rank'].toarray()
-                norm_counts_cell_count = adata[
-                    i : i + self.chunk_size, coding_miRNA_idx].layers['X_count'].toarray()
-                norm_counts_neighborhood_count = adata[
-                    i : i + self.chunk_size, coding_miRNA_idx].layers[
-                        'X_neighborhood_count'].toarray()
+        if not self.rank_differs_from_count:  # sparse-optimized path
+            print('Ranking gene tokens based on normalized counts (sparse version).')
+            for i in range(0, len(adata), self.chunk_size):
+                if self.include_zero_expr_genes:
+                    norm_counts_cell_rank = adata[
+                        i : i + self.chunk_size, coding_miRNA_idx].layers[
+                            'X_rank'].toarray()
+                    norm_counts_neighborhood_rank = adata[
+                        i : i + self.chunk_size, coding_miRNA_idx].layers[
+                            'X_neighborhood_rank'].toarray()
+                    norm_counts_cell_count = adata[
+                        i : i + self.chunk_size, coding_miRNA_idx].layers[
+                            'X_count'].toarray()
+                    norm_counts_neighborhood_count = adata[
+                        i : i + self.chunk_size, coding_miRNA_idx].layers[
+                            'X_neighborhood_count'].toarray()
 
-                # Rank gene tokens and append across chunks
-                adata_dict['gene_tokens_cell'] += [
-                    rank_gene_tokens(norm_counts_cell_rank[j],
-                    coding_miRNA_tokens_cell)
-                    for j in range(norm_counts_cell_rank.shape[0])]
-                adata_dict['gene_tokens_neighborhood'] += [
-                    rank_gene_tokens(norm_counts_neighborhood_rank[j],
-                    coding_miRNA_tokens_neighborhood)
-                    for j in range(norm_counts_neighborhood.shape[0])]
+                    # Rank gene tokens and append across chunks
+                    adata_dict['gene_tokens_cell'] += [
+                        rank_gene_tokens(norm_counts_cell_rank[j],
+                        coding_miRNA_tokens_cell)
+                        for j in range(norm_counts_cell_rank.shape[0])]
+                    adata_dict['gene_tokens_neighborhood'] += [
+                        rank_gene_tokens(norm_counts_neighborhood_rank[j],
+                        coding_miRNA_tokens_neighborhood)
+                        for j in range(norm_counts_neighborhood_rank.shape[0])]
 
-                # Rank gene expression and append across chunks
-                adata_dict['gene_expr_cell'] += [
-                    norm_counts_cell_count[j][np.argsort(-norm_counts_cell_rank[j])]
-                    for j in range(norm_counts_cell_rank.shape[0])]
-                adata_dict['gene_expr_neighborhood'] += [
-                    norm_counts_neighborhood_count[j][
-                        np.argsort(-norm_counts_neighborhood_rank[j])]
-                    for j in range(norm_counts_neighborhood_rank.shape[0])]
-            else:
-                norm_counts_cell_rank = sp.csr_matrix(adata[
-                    i : i + self.chunk_size, coding_miRNA_idx].layers['X_rank'])
-                norm_counts_neighborhood_rank = sp.csr_matrix(adata[
+                    # Rank gene expression and append across chunks
+                    adata_dict['gene_expr_cell'] += [
+                        norm_counts_cell_count[j][
+                            np.argsort(-norm_counts_cell_rank[j])]
+                        for j in range(norm_counts_cell_count.shape[0])]
+                    adata_dict['gene_expr_neighborhood'] += [
+                        norm_counts_neighborhood_count[j][
+                            np.argsort(-norm_counts_neighborhood_rank[j])]
+                        for j in range(norm_counts_neighborhood_count.shape[0])]
+
+                else:
+                    norm_counts_cell_rank = sp.csr_matrix(adata[
+                        i : i + self.chunk_size, coding_miRNA_idx].layers[
+                            'X_rank'])
+                    norm_counts_neighborhood_rank = sp.csr_matrix(adata[
+                        i : i + self.chunk_size, coding_miRNA_idx].layers[
+                            'X_neighborhood_rank'])
+                    norm_counts_cell_count = sp.csr_matrix(adata[
+                        i : i + self.chunk_size, coding_miRNA_idx].layers[
+                            'X_count'])
+                    norm_counts_neighborhood_count = sp.csr_matrix(adata[
+                        i : i + self.chunk_size, coding_miRNA_idx].layers[
+                            'X_neighborhood_count'])
+
+                    # Rank gene tokens and append across chunks
+                    adata_dict['gene_tokens_cell'] += [
+                        rank_gene_tokens(
+                            norm_counts_cell_rank[j].data,
+                            coding_miRNA_tokens_cell[
+                                norm_counts_cell_rank[j].indices])
+                        for j in range(norm_counts_cell_rank.shape[0])]
+                    adata_dict['gene_tokens_neighborhood'] += [
+                        rank_gene_tokens(
+                            norm_counts_neighborhood_rank[j].data,
+                            coding_miRNA_tokens_neighborhood[
+                                norm_counts_neighborhood_rank[j].indices])
+                        for j in range(norm_counts_neighborhood_rank.shape[0])]
+
+                    # Rank gene expression and append across chunks
+                    adata_dict['gene_expr_cell'] += [
+                        norm_counts_cell_count[j].data[
+                            np.argsort(-norm_counts_cell_rank[j].data)]
+                        for j in range(norm_counts_cell_rank.shape[0])]
+                    adata_dict['gene_expr_neighborhood'] += [
+                        norm_counts_neighborhood_count[j].data[
+                            np.argsort(-norm_counts_neighborhood_rank[j].data)]
+                        for j in range(norm_counts_neighborhood_rank.shape[0])]
+
+        else:  # dense path with lexsort tie-breaking
+            print('Ranking gene tokens based on normalized counts (dense version).')
+            for i in range(0, len(adata), self.chunk_size):
+                # --- Cell ---
+                cell_rank_block = adata[
+                    i : i + self.chunk_size, coding_miRNA_idx].layers['X_rank']
+                cell_count_block = adata[
+                    i : i + self.chunk_size, coding_miRNA_idx].layers['X_count']
+
+                if sp.issparse(cell_rank_block):
+                    cell_rank_block = cell_rank_block.toarray()
+                else:
+                    cell_rank_block = np.asarray(cell_rank_block)
+
+                if sp.issparse(cell_count_block):
+                    cell_count_block = cell_count_block.toarray()
+                else:
+                    cell_count_block = np.asarray(cell_count_block)
+
+                # --- Neighborhood ---
+                neigh_rank_block = adata[
                     i : i + self.chunk_size, coding_miRNA_idx].layers[
-                        'X_neighborhood_rank'])
-                norm_counts_cell_count = sp.csr_matrix(adata[
-                    i : i + self.chunk_size, coding_miRNA_idx].layers['X_count'])
-                norm_counts_neighborhood_count = sp.csr_matrix(adata[
+                        'X_neighborhood_rank']
+                neigh_count_block = adata[
                     i : i + self.chunk_size, coding_miRNA_idx].layers[
-                        'X_neighborhood_count'])
+                        'X_neighborhood_count']
 
-                # Rank gene tokens and append across chunks
-                adata_dict['gene_tokens_cell'] += [
-                    rank_gene_tokens(norm_counts_cell_rank[j].data,
-                    coding_miRNA_tokens_cell[norm_counts_cell_rank[j].indices])
-                    for j in range(norm_counts_cell_rank.shape[0])]
-                adata_dict['gene_tokens_neighborhood'] += [
-                    rank_gene_tokens(norm_counts_neighborhood_rank[j].data,
-                    coding_miRNA_tokens_neighborhood[
-                        norm_counts_neighborhood_rank[j].indices])
-                    for j in range(norm_counts_neighborhood_rank.shape[0])]
+                if sp.issparse(neigh_rank_block):
+                    neigh_rank_block = neigh_rank_block.toarray()
+                else:
+                    neigh_rank_block = np.asarray(neigh_rank_block)
 
-                # Rank gene expression and append across chunks
-                adata_dict['gene_expr_cell'] += [
-                    norm_counts_cell_count[j].data[np.argsort(
-                        -norm_counts_cell_rank[j].data)]
-                    for j in range(norm_counts_cell_rank.shape[0])]
-                adata_dict['gene_expr_neighborhood'] += [
-                    norm_counts_neighborhood_count[j].data[
-                        np.argsort(-norm_counts_neighborhood_rank[j].data)]
-                    for j in range(norm_counts_neighborhood_rank.shape[0])]
+                if sp.issparse(neigh_count_block):
+                    neigh_count_block = neigh_count_block.toarray()
+                else:
+                    neigh_count_block = np.asarray(neigh_count_block)
+
+                for j in range(cell_rank_block.shape[0]):
+                    # --- Cell: lexsort with tie-breaking ---
+                    cell_rank_row = cell_rank_block[j]
+                    cell_count_row = cell_count_block[j]
+
+                    cell_order = np.lexsort((-cell_count_row, -cell_rank_row))
+
+                    sorted_cell_tokens = coding_miRNA_tokens_cell[
+                        cell_order].copy()
+                    sorted_cell_rank = cell_rank_row[cell_order]
+                    sorted_cell_expr = cell_count_row[cell_order].astype(
+                        np.float64, copy=True)
+
+                    if not self.include_zero_expr_genes:
+                        zero_mask = (sorted_cell_rank == 0)
+                        sorted_cell_tokens[zero_mask] = 0
+                        sorted_cell_expr[zero_mask] = 0.0
+
+                    adata_dict['gene_tokens_cell'].append(
+                        sorted_cell_tokens.tolist())
+                    adata_dict['gene_expr_cell'].append(
+                        sorted_cell_expr.tolist())
+
+                    # --- Neighborhood: lexsort with tie-breaking ---
+                    neigh_rank_row = neigh_rank_block[j]
+                    neigh_count_row = neigh_count_block[j]
+
+                    neigh_order = np.lexsort(
+                        (-neigh_count_row, -neigh_rank_row))
+
+                    sorted_neigh_tokens = coding_miRNA_tokens_neighborhood[
+                        neigh_order].copy()
+                    sorted_neigh_rank = neigh_rank_row[neigh_order]
+                    sorted_neigh_expr = neigh_count_row[neigh_order].astype(
+                        np.float64, copy=True)
+
+                    if not self.include_zero_expr_genes:
+                        zero_mask = (sorted_neigh_rank == 0)
+                        sorted_neigh_tokens[zero_mask] = 0
+                        sorted_neigh_expr[zero_mask] = 0.0
+
+                    adata_dict['gene_tokens_neighborhood'].append(
+                        sorted_neigh_tokens.tolist())
+                    adata_dict['gene_expr_neighborhood'].append(
+                        sorted_neigh_expr.tolist())
 
         # Add cell IDs for collecting metadata at inference time
         adata_dict['cell_id'] = adata.obs['cell_id'].values.tolist()
@@ -1459,15 +1565,18 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         Format examples.
         """
         # Retrieve gene tokens
+        seq_len_cell = self.seq_len_cell  # model_input_size / (n_neighs + 1)
+        seq_len_neighborhood = self.model_input_size - seq_len_cell
+
         gene_tokens_cell, n_nonzero_cell_tokens = process_gene_tokens(
             example['gene_tokens_cell'],
-            int(self.model_input_size / 2),
+            seq_len_cell,
             self.token_dict)
         del example['gene_tokens_cell']
         gene_tokens_neighborhood, \
         n_nonzero_neighborhood_tokens = process_gene_tokens(
             example['gene_tokens_neighborhood'],
-            int(self.model_input_size / 2),
+            seq_len_neighborhood,
             self.token_dict)
         del example['gene_tokens_neighborhood']
         example['gene_tokens'] = np.concatenate(
@@ -1477,11 +1586,11 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         # Retrieve gene expression
         gene_expr_cell = process_gene_expr(
             example['gene_expr_cell'],
-            int(self.model_input_size / 2))
+            seq_len_cell)
         del example['gene_expr_cell']
         gene_expr_neighborhood = process_gene_expr(
             example['gene_expr_neighborhood'],
-            int(self.model_input_size / 2))
+            seq_len_neighborhood)
         del example['gene_expr_neighborhood']
         example['gene_expr'] = np.concatenate(
             (gene_expr_cell.copy(), gene_expr_neighborhood.copy())).astype(
@@ -1498,6 +1607,16 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
         #     np.array([2 if gene_token != 0 else 0
         #               for gene_token in gene_tokens_neighborhood])
         #               )).astype(int)
+
+        # Add padding to make all sequences have length 'model_input_size'
+        if len(example['gene_tokens']) < self.model_input_size:
+            example['gene_tokens'] = np.append(
+                example['gene_tokens'],
+                np.zeros(self.model_input_size - len(example['gene_tokens']),
+                         dtype=int))
+            example['gene_expr'] = np.append(
+                example['gene_expr'],
+                np.zeros(self.model_input_size - len(example['gene_expr'])))
         
         # Retrieve special tokens
         #example['cls_tokens'] = [self.token_dict['<cls_0>'],

@@ -96,7 +96,7 @@ def tokenize_adata(adata: ad.AnnData,
     print('STEP 2: TOKENIZING ANNDATA OBJECT...')
     print('==================================================')
     # Tokenize adata
-    if model_config['data']['tokenizer_type'] == 'cell_neighborhood':
+    if model_config['data']['tokenizer_type'] == 'cell_neigh':
         Tokenizer = cell_tokenizers.CellNeighborhoodTokenizer
     elif model_config['data']['tokenizer_type'] == 'cell_graph':
         Tokenizer = cell_tokenizers.CellGraphTokenizer
