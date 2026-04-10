@@ -196,7 +196,7 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
             attn_base: torch.Tensor | None,
             layers: Sequence[int],
             masks: list[torch.Tensor] | torch.Tensor | None,
-            cell_only: bool,
+            n_included_cells: int = 10,
             ignore_spc_tokens: bool = False) -> dict[int, torch.Tensor]:
         """
         Helper function to return embeddings for either full context or
@@ -209,6 +209,8 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
         if masks is not None and not isinstance(masks, list):
             masks = [masks]
 
+        x = x.clone()
+
         attn = None
         if attn_base is not None:
             if attn_base.size(2) == 1: # [B, 1, 1, L] -> [B, 1, L, L]
@@ -219,23 +221,16 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
             #    # Never attend to special tokens
             #    if self.n_special_tokens > 0:
             #        attn[:, :, :, :self.n_special_tokens] = False
-            # Optionally block cross-attention from cell queries to
-            # neighborhood keys
-            if cell_only:
+            # Block attention from included cell queries to excluded cell keys
+            if n_included_cells:
                 attn[
                     :,
                     :,
-                    :(self.n_special_tokens+self.seq_len_cell),
-                    (self.n_special_tokens+self.seq_len_cell):] = False
+                    self.n_special_tokens: (self.n_special_tokens + self.seq_len_cell * n_included_cells),
+                    (self.n_special_tokens + self.seq_len_cell * n_included_cells):] = False
 
-        if cell_only:
-            x[:, (self.n_special_tokens+self.seq_len_cell):, :] = 0
-
-            #print('model cell attn')
-            #torch.set_printoptions(profile="full")
-            #print(attn.shape)
-            #print(attn[0, :, 1, :])
-            #print(attn[0, :, 65, :])
+        if n_included_cells:
+            x[:, (self.n_special_tokens + self.seq_len_cell * n_included_cells):, :] = 0
 
         # Mask token embeddings if masks are provided
         if masks is not None:
@@ -252,8 +247,7 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
 
         # Run forward prop and store embeddings for each specified layer
         out: dict[int, torch.Tensor] = {}
-        if DEBUG:
-            valid_mask = x.ne(0).any(dim=-1)
+        valid_mask = x.ne(0).any(dim=-1)
         for i, blk in enumerate(self.blocks, start=1):
             x = blk(x, masks=attn)
             if i == len(self.blocks) and (self.norm is not None):
@@ -1214,7 +1208,7 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
             batch: Mapping[str, torch.Tensor],
             masks: list[torch.Tensor] | torch.Tensor | None = None,
             masks_attention: torch.Tensor | None = None,
-            need_cell_only_context: bool = True,
+            n_included_cells_list: list[int] = [],
             ignore_spc_tokens: bool = True,
             ) -> tuple[
                 dict[int, torch.Tensor], dict[int, torch.Tensor] | None]:
@@ -1337,22 +1331,18 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
         #    if self.n_special_tokens:
         #        x[:, :self.n_special_tokens, :] = 0
 
-        full_ctx: dict[int, torch.Tensor] = self._compute_layer_emb(
-            x,
-            masks_attention,
-            layers,
-            masks,
-            cell_only=False,
-            ignore_spc_tokens=ignore_spc_tokens)
-        cell_only_ctx: dict[int, torch.Tensor] = self._compute_layer_emb(
-            x,
-            masks_attention,
-            layers,
-            masks,
-            cell_only=True,
-            ignore_spc_tokens=ignore_spc_tokens) if need_cell_only_context else None
+        ctx_layer_gene_emb = {}
+        for n_included_cells in n_included_cells_list:
+            layer_gene_emb: dict[int, torch.Tensor] = self._compute_layer_emb(
+                x,
+                masks_attention,
+                layers,
+                masks,
+                n_included_cells=n_included_cells,
+                ignore_spc_tokens=ignore_spc_tokens)
+            ctx_layer_gene_emb[n_included_cells] = layer_gene_emb
 
-        return full_ctx, cell_only_ctx
+        return ctx_layer_gene_emb
 
 
 class GeneTransformerRankPredictor(GeneTransformerBasePredictor):

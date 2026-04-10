@@ -66,6 +66,7 @@ def embed_dataset(dataset: Dataset,
                   ignore_spc_tokens: bool = True,
                   agg_type: Literal['avg',
                                     'softmax'] = 'avg',
+                  n_included_cells_list: list = [1,2,3,4,5,6,7,8,9,10,11],
                   ) -> dict:
     """
     Parameters
@@ -234,13 +235,9 @@ def embed_dataset(dataset: Dataset,
             is_training=False)
     target_encoder.eval()
 
-    # Retrieve embeddings
-    all_cell_emb_list = []
-    if include_spatial_cell_emb:
-        all_spatial_cell_emb_list = []
-    all_neighborhood_emb_list = []
-    if return_token_embeddings:
-        all_token_emb_list = []
+    if len(n_included_cells_list) == 0:
+        n_included_cells_list = [1, n_segments]
+    all_ctx_agg_emb = [[] for i in range(len(n_included_cells_list))]
 
     for itr, (udata, _, _, masks_attention, pad_special_tokens) in tqdm(enumerate(loader)):
         for key in udata.keys():
@@ -258,99 +255,42 @@ def embed_dataset(dataset: Dataset,
 
             emb_layers = [emb_layer]
 
-            full_ctx, cell_only_ctx = return_layer_emb_fn(
+            ctx_layer_gene_emb = return_layer_emb_fn(
                 layers=emb_layers,
                 batch=udata,
                 masks_attention=masks_attention,
-                need_cell_only_context=True,
+                n_included_cells_list=n_included_cells_list,
                 ignore_spc_tokens=ignore_spc_tokens,
             )
 
-            c_emb = cell_only_ctx[emb_layer].cpu()
-            n_emb = full_ctx[emb_layer].cpu()
-            if return_token_embeddings:
-                # n_emb contains embeddings for all tokens
-                all_token_emb_list.append(n_emb)
-        
-        # Create mask for index cell genes
-        cell_mask = create_binary_selection_mask(
-            ns_tokens,
-            selection_type="agg_cell",
-            excluded_tokens=agg_excluded_tokens,
-            seq_len_cell=model_config['data']['seq_len_cell'],
-            top_k=top_k).cpu()
-
-        #torch.set_printoptions(threshold=float('inf'))
-        #print('ns tokens')
-        #print(ns_tokens[0])
-        #print('cell mask')
-        #print(cell_mask[0])
-        #raise ValueError
-
-        # Create mask for neighbor cell genes
-        if model_config['data']['tokenizer_type'] == 'cell_neigh':
-            neighborhood_mask = create_binary_selection_mask(
+        for i, n in enumerate(n_included_cells_list):
+            mask = create_binary_selection_mask(
                 ns_tokens,
-                selection_type="agg_neighborhood",
-                excluded_tokens=agg_excluded_tokens,
-                seq_len_cell=model_config['data']['seq_len_cell'],
-                top_k=top_k).cpu()
-        elif model_config['data']['tokenizer_type'] == 'cell_graph':
-            neighborhood_mask = create_binary_selection_mask(
-                ns_tokens,
-                selection_type="agg_graph",
+                selection_type="agg",
+                n_included_cells=n,
                 excluded_tokens=agg_excluded_tokens,
                 seq_len_cell=model_config['data']['seq_len_cell'],
                 top_k=top_k,
                 n_segments=model_config['data']['n_segments']).cpu()
+            for j, l in enumerate(emb_layers):
+                gene_emb = ctx_layer_gene_emb[n][l].cpu()
+                if agg_type == 'avg':
+                    mean_unmasked_emb = compute_mean_unmasked_emb(
+                        gene_emb, mask)
+                elif agg_type == "weighted_avg":
+                    weights = compute_unmasked_rank_based_weights(
+                        tokens, mask)
+                    mean_unmasked_emb = compute_mean_unmasked_emb(
+                        gene_emb * weights.unsqueeze(-1),
+                        mask)
 
-        # Average gene embeddings into cell and neighborhood embedding
-        if agg_type == 'avg':                    
-            cell_emb = compute_mean_unmasked_emb(c_emb, cell_mask)
-            if include_spatial_cell_emb:
-                spatial_cell_emb = compute_mean_unmasked_emb(n_emb, cell_mask)
-            neighborhood_emb = compute_mean_unmasked_emb(n_emb, neighborhood_mask)
-        elif agg_type == 'softmax':
-            values = udata['values'][:, n_special_tokens:].detach().cpu()
-            cell_values = values.masked_fill(~cell_mask, float('-inf'))
-            cell_weights = torch.softmax(cell_values, dim=1)
-            cell_emb = compute_softmax_weighted_mean_emb(c_emb, cell_weights)
-            if include_spatial_cell_emb:
-                spatial_cell_emb = compute_softmax_weighted_mean_emb(n_emb, cell_weights)
-            neighborhood_values = values.masked_fill(~neighborhood_mask, float('-inf'))
-            neighborhood_weights = torch.softmax(neighborhood_values, dim=1)
-            torch.set_printoptions(threshold=float('inf'))
-            #print('cell weights')
-            #print(cell_weights[0])
-            #print('neighborhood weights')
-            #print(neighborhood_weights[0])
-            #raise ValueError
-            neighborhood_emb = compute_softmax_weighted_mean_emb(n_emb, neighborhood_weights)            
+                # Concat layer-specific embeddings across batches
+                if itr == 0:
+                    all_ctx_agg_emb[i].append([mean_unmasked_emb])
+                else:
+                    all_ctx_agg_emb[i][j].append(mean_unmasked_emb)
 
-        all_cell_emb_list.append(cell_emb)
-        if include_spatial_cell_emb:
-            all_spatial_cell_emb_list.append(spatial_cell_emb)
-        all_neighborhood_emb_list.append(neighborhood_emb)
-
-    output_embed = {}        
-
-    # Store cell, spatially contextualized cell and neighborhood embeddings of
-    # all observations
-    output_embed["cell_emb"] = np.array(torch.cat(
-        all_cell_emb_list,
-        dim=0))
-    output_embed["neighborhood_emb"] = np.array(torch.cat(
-        all_neighborhood_emb_list,
-        dim=0))
-    if include_spatial_cell_emb:
-        output_embed["spatial_cell_emb"] = np.array(torch.cat(
-            all_spatial_cell_emb_list,
-            dim=0))        
-    if return_token_embeddings:
-        output_embed["token_emb"] = np.array(torch.cat(
-            all_token_emb_list,
-            dim=0))
-    return output_embed
+    return all_ctx_agg_emb
 
 
 @torch.inference_mode()
@@ -548,7 +488,7 @@ def harmonize_tokenize_embed_pipeline(
 
     print('==================================================')
     print(f"Embedding tokenized data...")
-    output_embed = embed_dataset(
+    all_ctx_agg_emb = embed_dataset(
         dataset=dataset,
         model_folder_path=model_folder_path,
         emb_layer=emb_layer,
@@ -561,9 +501,12 @@ def harmonize_tokenize_embed_pipeline(
         agg_type=agg_type)
     print(f"Embedded tokenized data.")
 
-    # Add embeddings to adata
-    for key, values in output_embed.items():
-        adata.obsm[key] = values
+    # Store cell and neighborhood embeddings of all observations across layers
+    for i, n in enumerate(n_included_cells_list):
+        for j, l in enumerate(emb_layers):
+            adata.obsm[f"ctx_{n}_emb_layer_{l}"] = np.array(torch.cat(
+                all_ctx_agg_emb[i][j],
+                dim=0))
 
     return adata
 
