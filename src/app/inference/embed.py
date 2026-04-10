@@ -324,6 +324,8 @@ def harmonize_tokenize_embed_pipeline(
         add_neigh_cell_ids: bool = False,
         ignore_spc_tokens: bool = True,
         agg_type: Literal['avg', 'softmax'] = 'avg',
+        emb_layers: list[int] | None = None,
+        n_included_cells_list: list = [1,2,3,4,5,6,7,8,9,10,11],
         ) -> ad.AnnData:
     """
     Harmonize, tokenize and embed an AnnData object.
@@ -498,8 +500,13 @@ def harmonize_tokenize_embed_pipeline(
         pin_memory=pin_memory,
         num_workers=num_workers,
         ignore_spc_tokens=ignore_spc_tokens,
-        agg_type=agg_type)
+        agg_type=agg_type,
+        n_included_cells_list=n_included_cells_list)
     print(f"Embedded tokenized data.")
+
+    # Specify last emb layer if not defined
+    if emb_layers is None:
+        emb_layers = [3]
 
     # Store cell and neighborhood embeddings of all observations across layers
     for i, n in enumerate(n_included_cells_list):
