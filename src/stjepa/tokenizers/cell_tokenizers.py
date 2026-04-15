@@ -208,9 +208,6 @@ class CellBaseTokenizer(ABC):
         self.add_neigh_cell_ids = add_neigh_cell_ids
         self.include_special_tokens = include_special_tokens
 
-        # TODO fix this for radius and delaunay
-        self.seq_len_cell = int(self.model_input_size / (self.n_neighs + 1))
-
         # Define whether ranking differs from count-based ranking
         self.rank_differs_from_count = True
         if (
@@ -435,6 +432,9 @@ class CellGraphTokenizer(CellBaseTokenizer):
             CellBaseTokenizer.
         """
         super().__init__(**base_tokenizer_kwargs)
+
+        # TODO fix this for radius and delaunay
+        self.seq_len_cell = int(self.model_input_size / (self.n_neighs + 1))
 
     def _tokenize_adata(self,
                         adata_file_path: Path | str | None = None,
@@ -1040,6 +1040,7 @@ class CellGraphTokenizer(CellBaseTokenizer):
 
 class CellNeighborhoodTokenizer(CellBaseTokenizer):
     def __init__(self,
+                 split_cell_neigh_equally: bool = True,
                  **base_tokenizer_kwargs,
                  ):
         """
@@ -1047,11 +1048,21 @@ class CellNeighborhoodTokenizer(CellBaseTokenizer):
 
         Parameters
         -----------
+        split_cell_neigh_equally:
+            Whether to split the model input size equally between the index
+            cell and neighborhood cells, or to allocate more space for the
+            neighborhood.
         **base_tokenizer_kwargs:
             Keyword arguments for the initialization of the
             CellBaseTokenizer.
         """
         super().__init__(**base_tokenizer_kwargs)
+
+        # TODO fix this for radius and delaunay
+        if split_cell_neigh_equally:
+            self.seq_len_cell = int(self.model_input_size / 2)
+        else:
+            self.seq_len_cell = int(self.model_input_size / (self.n_neighs + 1))
 
     def _tokenize_adata(self,
                         adata_file_path: Path | str | None = None,
