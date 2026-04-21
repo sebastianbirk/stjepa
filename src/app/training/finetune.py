@@ -121,7 +121,11 @@ def finetune(args: dict,
         cell_pos_enc = args['meta']['cell_pos_enc']
     else:
         cell_pos_enc = 'segment'
-    enc_depth = args['meta']['enc_depth'] 
+    if 'rope_coord_normalization' in args['meta'].keys():
+        rope_coord_normalization = args['meta']['rope_coord_normalization']
+    else:
+        rope_coord_normalization = 'none'
+    enc_depth = args['meta']['enc_depth']
     enc_emb_dim = args['meta']['enc_emb_dim']    
     pred_depth = args['meta']['pred_depth']
     pred_emb_dim = args['meta']['pred_emb_dim']
@@ -270,7 +274,8 @@ def finetune(args: dict,
         sampling_strategy=None,
         n_nonzero_tokens_list=n_nonzero_tokens,
         include_cell_id=False,
-        sep_gene_tokens_neb=sep_gene_tokens_neb)
+        sep_gene_tokens_neb=sep_gene_tokens_neb,
+        rope_coord_normalization=rope_coord_normalization)
 
     loader, sampler = init_dataloader_and_sampler(
         cell_dataset=cell_dataset,

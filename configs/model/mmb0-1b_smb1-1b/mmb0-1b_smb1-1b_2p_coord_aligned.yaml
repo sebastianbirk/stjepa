@@ -58,8 +58,9 @@ meta:
   excl_spc_from_loss: True # True, False
   target_enc_layer_norm: True
   restrict_special_attention: False
-  rope_freq_scale: 0.0196      # ≈ π/160, matches actual displacement range
-  rope_rotation_augment: False  # leave as-is for now
+  rope_freq_scale: 3.141592653589793   # math.pi, for unit-disk normalized coords
+  rope_rotation_augment: True
+  rope_coord_normalization: 'per_sample_unit_disk'   # NEW
 mask:
   n_contexts: 1 # 1
   n_targets: 1 # 5 # 1 =, this is the number of blocks in block masking

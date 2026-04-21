@@ -144,6 +144,10 @@ def train(args: dict,
         cell_pos_enc = args['meta']['cell_pos_enc']
     else:
         cell_pos_enc = 'segment'
+    if 'rope_coord_normalization' in args['meta'].keys():
+        rope_coord_normalization = args['meta']['rope_coord_normalization']
+    else:
+        rope_coord_normalization = 'none'
     enc_depth = args['meta']['enc_depth'] 
     enc_emb_dim = args['meta']['enc_emb_dim']    
     pred_depth = args['meta']['pred_depth']
@@ -397,7 +401,8 @@ def train(args: dict,
                 n_nonzero_tokens_list=nz,
                 include_cell_id=False,
                 sep_gene_tokens_neb=sep_gene_tokens_neb,
-                nz_spc=nz_spc)
+                nz_spc=nz_spc,
+                rope_coord_normalization=rope_coord_normalization)
             train_cell_datasets.append(cell_d)
 
     else:
@@ -414,7 +419,8 @@ def train(args: dict,
             n_nonzero_tokens_list=n_nonzero_tokens,
             include_cell_id=False,
             sep_gene_tokens_neb=sep_gene_tokens_neb,
-            nz_spc=nz_spc)
+            nz_spc=nz_spc,
+            rope_coord_normalization=rope_coord_normalization)
 
     if isinstance(train_dataset, list):
         train_loaders = []

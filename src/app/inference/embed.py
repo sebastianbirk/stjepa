@@ -212,7 +212,9 @@ def embed_dataset(dataset: Dataset,
         n_nonzero_tokens_list=[],
         include_cell_id=True,
         sep_gene_tokens_neb=model_config['data']['sep_gene_tokens_neb'],
-        pad_special_tokens=True,)
+        pad_special_tokens=True,
+        rope_coord_normalization=model_config['meta'].get(
+            'rope_coord_normalization', 'none'),)
 
     # Initialize dataloader
     loader, _ = init_dataloader_and_sampler(
@@ -740,7 +742,9 @@ def gene_embed_dataset(dataset: Dataset,
         n_nonzero_tokens_list=[],
         include_cell_id=True,
         sep_gene_tokens_neb=model_config['data']['sep_gene_tokens_neb'],
-        pad_special_tokens=True,)
+        pad_special_tokens=True,
+        rope_coord_normalization=model_config['meta'].get(
+            'rope_coord_normalization', 'none'),)
 
     # Initialize dataloader
     loader, _ = init_dataloader_and_sampler(

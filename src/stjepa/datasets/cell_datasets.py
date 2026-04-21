@@ -25,6 +25,8 @@ class CellBaseDataset(Dataset):
                  sep_gene_tokens_neb: bool = False,
                  nz_spc: bool = True,
                  pad_special_tokens: bool = False,
+                 rope_coord_normalization: Literal[
+                     'none', 'per_sample_unit_disk'] = 'none',
                  ):
         """
         Torch CellBaseDataset class.
@@ -59,9 +61,15 @@ class CellBaseDataset(Dataset):
             raise ValueError(f'Invalid "gt_type": {gt_type}.')
         if cell_pos_enc not in ['segment', 'coord', 'rope']:
             raise ValueError(f'Invalid "cell_pos_enc": {cell_pos_enc}.')
-        
+        if rope_coord_normalization not in (
+                'none', 'per_sample_unit_disk'):
+            raise ValueError(
+                f'Invalid "rope_coord_normalization": '
+                f'{rope_coord_normalization}.')
+
         self.gt_type = gt_type
         self.cell_pos_enc = cell_pos_enc
+        self.rope_coord_normalization = rope_coord_normalization
 
         exclude_cols = [
             #'gene_panel_value',
@@ -102,6 +110,40 @@ class CellBaseDataset(Dataset):
 
     def __len__(self) -> int:
         return self.len
+
+    def _maybe_normalize_rope_coords(self, item: dict) -> None:
+        """
+        In-place per-sample coordinate normalization for RoPE mode.
+
+        When `cell_pos_enc == 'rope'` and
+        `rope_coord_normalization == 'per_sample_unit_disk'`, rescales
+        `item['rel_x_coord']` and `item['rel_y_coord']` so that the
+        farthest neighbor (by L2 distance from the index cell) lies on
+        the unit circle. This decouples RoPE rotation angles from
+        absolute physical units (microns, pixels) and from cell density,
+        which is critical for generalizing across datasets with
+        different neighborhood scales. Only applied in 'rope' mode —
+        'coord' mode keeps raw coords so its learned sincos embeddings
+        stay on the trained scale.
+
+        A no-op if normalization is disabled or the mode is not 'rope'.
+        """
+        if self.cell_pos_enc != 'rope':
+            return
+        if self.rope_coord_normalization == 'none':
+            return
+        if self.rope_coord_normalization == 'per_sample_unit_disk':
+            rx = item['rel_x_coord'].to(dtype=torch.float32)
+            ry = item['rel_y_coord'].to(dtype=torch.float32)
+            r = torch.sqrt(rx * rx + ry * ry).max()
+            # Guard against the degenerate case where all neighbors
+            # share the index cell's coordinates (r == 0). Leaving
+            # r == 0 would produce NaN after division; clamping to a
+            # tiny positive number keeps every token within a rotation
+            # near the identity, which RoPE handles safely.
+            r = r.clamp(min=1e-6)
+            item['rel_x_coord'] = rx / r
+            item['rel_y_coord'] = ry / r
 
     def _add_special_seq(self,
                          item: int,
@@ -418,6 +460,7 @@ class CellGraphDataset(CellBaseDataset):
                     item['rel_x_coord'], self.seq_len_cell)
                 item['rel_y_coord'] = torch.repeat_interleave(
                     item['rel_y_coord'], self.seq_len_cell)
+            self._maybe_normalize_rope_coords(item)
 
         # Add segment to item (TODO: if statement to support old API)
         if 'seg_tokens' not in item.keys():
@@ -717,7 +760,12 @@ class CellNeighborhoodDataset(CellBaseDataset):
             # Mask out positions where gene_tokens == 0
             seg_tokens = seg_tokens * (item['gene_tokens'] != 0).long()
             item['seg_tokens'] = seg_tokens
-        
+
+        # Apply per-sample RoPE coord normalization before the segment
+        # slicing reads from item['rel_x_coord'] / item['rel_y_coord'].
+        if 'rel_x_coord' in item.keys():
+            self._maybe_normalize_rope_coords(item)
+
         # Get (sampled) gene tokens, positions, segments, and values
         gene_tokens_cell, \
         values_cell, \

@@ -192,6 +192,10 @@ def infer(args: dict,
         rope_rotation_augment = args['meta']['rope_rotation_augment']
     else:
         rope_rotation_augment = False
+    if 'rope_coord_normalization' in args['meta'].keys():
+        rope_coord_normalization = args['meta']['rope_coord_normalization']
+    else:
+        rope_coord_normalization = 'none'
 
     dataset_name = args['data']['dataset_name']
     token_dict_folder_path = args['data']['token_dict_folder_path']
@@ -368,7 +372,8 @@ def infer(args: dict,
         n_nonzero_tokens_list=[],
         include_cell_id=True,
         sep_gene_tokens_neb=sep_gene_tokens_neb,
-        nz_spc=nz_spc)
+        nz_spc=nz_spc,
+        rope_coord_normalization=rope_coord_normalization)
 
     loader, _ = init_dataloader_and_sampler(
         cell_dataset=cell_dataset,
