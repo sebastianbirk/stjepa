@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 class CellBaseDataset(Dataset):
     def __init__(self,
                  gt_type: Literal['rank', 'counts', 'combined'],
-                 cell_pos_enc: Literal['segment', 'coord'],
+                 cell_pos_enc: Literal['segment', 'coord', 'rope'],
                  dataset: datasets.Dataset,
                  vocab_size: int,
                  seq_len_cell: int,
@@ -57,7 +57,7 @@ class CellBaseDataset(Dataset):
         """
         if gt_type not in ['rank', 'counts', 'combined']:
             raise ValueError(f'Invalid "gt_type": {gt_type}.')
-        if cell_pos_enc not in ['segment', 'coord']:
+        if cell_pos_enc not in ['segment', 'coord', 'rope']:
             raise ValueError(f'Invalid "cell_pos_enc": {cell_pos_enc}.')
         
         self.gt_type = gt_type
@@ -173,7 +173,7 @@ class CellBaseDataset(Dataset):
                 item_dict['segments']])
 
         # Add special token coords
-        if self.cell_pos_enc == 'coord':
+        if self.cell_pos_enc in ('coord', 'rope'):
             item_dict['rel_x_coords'] = torch.cat(
                 [torch.full((self.n_special_tokens,),
                  float('-inf'), dtype=torch.float),
@@ -320,7 +320,7 @@ class CellBaseDataset(Dataset):
                     segment_start_idx: segment_end_idx]
             else:
                 segment_values = None
-            if self.cell_pos_enc == 'coord':
+            if self.cell_pos_enc in ('coord', 'rope'):
                 segment_rel_x_coords = item['rel_x_coord'][
                     segment_start_idx: segment_end_idx]
                 segment_rel_y_coords = item['rel_y_coord'][
@@ -354,7 +354,7 @@ class CellBaseDataset(Dataset):
                 segment_tokens = segment_tokens[:segment_seq_len]
                 if self.gt_type != 'rank':
                     segment_values = segment_values[:segment_seq_len]
-                if self.cell_pos_enc == 'coord':
+                if self.cell_pos_enc in ('coord', 'rope'):
                     segment_rel_x_coords = segment_rel_x_coords[
                         :segment_seq_len]
                     segment_rel_y_coords = segment_rel_y_coords[
@@ -452,7 +452,7 @@ class CellGraphDataset(CellBaseDataset):
         item_dict['segments'][segment_token_zero_mask] = torch.tensor(
             0, dtype=torch.long)
 
-        if self.cell_pos_enc == 'coord':
+        if self.cell_pos_enc in ('coord', 'rope'):
             item_dict['rel_x_coords'][segment_token_zero_mask] = torch.tensor(
                 float('-inf'), dtype=torch.float)
             item_dict['rel_y_coords'][segment_token_zero_mask] = torch.tensor(
@@ -499,7 +499,7 @@ class CellGraphDataset(CellBaseDataset):
                     torch.tensor(0, dtype=torch.long)).to(dtype=torch.long)
                 item_dict['segments'] = torch.cat(
                     [item_dict['segments'], segment_tensor], dim=0)
-                if self.cell_pos_enc == 'coord':
+                if self.cell_pos_enc in ('coord', 'rope'):
                     segment_rel_x_coords[segment_zero_mask] = torch.tensor(
                         float('-inf'), dtype=torch.float)
                     segment_rel_y_coords[segment_zero_mask] = torch.tensor(
@@ -520,7 +520,7 @@ class CellGraphDataset(CellBaseDataset):
                 item_dict['positions'] = item_dict['positions'][:target_len]
             if self.gt_type != 'rank':
                 item_dict['values'] = item_dict['values'][:target_len]
-            if self.cell_pos_enc == 'coord':
+            if self.cell_pos_enc in ('coord', 'rope'):
                 item_dict['rel_x_coords'] = item_dict['rel_x_coords'][
                     :target_len]
                 item_dict['rel_y_coords'] = item_dict['rel_y_coords'][
@@ -538,7 +538,7 @@ class CellGraphDataset(CellBaseDataset):
             if self.gt_type != 'rank':
                 item_dict['values'] = F.pad(
                     item_dict['values'], (0, pad_len), value=0.0)
-            if self.cell_pos_enc == 'coord':
+            if self.cell_pos_enc in ('coord', 'rope'):
                 item_dict['rel_x_coords'] = F.pad(
                     item_dict['rel_x_coords'],
                     (0, pad_len),
@@ -638,7 +638,7 @@ class CellNeighborhoodDataset(CellBaseDataset):
                 segment_start_idx:segment_end_idx]
         else:
             segment_values = None
-        if self.cell_pos_enc == 'coord':
+        if self.cell_pos_enc in ('coord', 'rope'):
             segment_rel_x_coords = item['rel_x_coord'][
                 segment_start_idx:segment_end_idx]
             segment_rel_y_coords = item['rel_y_coord'][
@@ -667,7 +667,7 @@ class CellNeighborhoodDataset(CellBaseDataset):
             segment_tokens = segment_tokens[:segment_seq_len]
             if self.gt_type != 'rank':
                 segment_values = segment_values[:segment_seq_len]
-            if self.cell_pos_enc == 'coord':
+            if self.cell_pos_enc in ('coord', 'rope'):
                 segment_rel_x_coords = segment_rel_x_coords[
                     :segment_seq_len]
                 segment_rel_y_coords = segment_rel_y_coords[
@@ -744,7 +744,7 @@ class CellNeighborhoodDataset(CellBaseDataset):
                 dtype=torch.long)
         item_dict['segments'] = torch.cat(
             [segments_cell, segments_neigh], dim=0)
-        if self.cell_pos_enc == 'coord':
+        if self.cell_pos_enc in ('coord', 'rope'):
             item_dict['rel_x_coords'] = torch.cat(
                 [rel_x_coords_cell, rel_x_coords_neigh], dim=0)
             item_dict['rel_y_coords'] = torch.cat(

@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 
 from .modules import Attention, Block, MLP, ValueEmbWeightsProjection
+from .rope2d import RoPE2D
 from .utils import (get_1d_sincos_pos_embed,
                     get_1d_sincos_pos_embed_from_coord,
                     repeat_interleave_batch,
@@ -79,13 +80,25 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
         Version of the API to use.
     sep_gene_tokens_neb:
         If `True`, use separate gene tokens for neighborhood.
+    rope_freq_scale:
+        Frequency scale for 2D RoPE (only used when
+        `cell_pos_enc == 'rope'`). With coordinates normalized so
+        typical neighbor displacement ~ 1, the default `pi` gives
+        roughly one full oscillation across the neighborhood at the
+        highest frequency channel. If your coordinates are in a
+        larger range (e.g., [-50, 50]), pass a proportionally smaller
+        value such as `math.pi / 50`.
+    rope_rotation_augment:
+        If `True`, at training time each sample's (x, y) is rotated
+        by a uniformly random angle before RoPE is applied, giving
+        statistical rotation invariance.
     """
     def __init__(self,
                  vocab_size: int,
                  seq_len: int,
                  n_special_tokens: int,
                  n_segments: int,
-                 cell_pos_enc: Literal['segment', 'coord'],
+                 cell_pos_enc: Literal['segment', 'coord', 'rope'],
                  embed_dim: int = 768,
                  depth: int = 12,
                  predictor_embed_dim: int = 384,
@@ -103,6 +116,8 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
                  api_version: Literal['v1', 'v2', 'v3'] = 'v3',
                  sep_gene_tokens_neb: bool = False,
                  nz_spc: bool = False,
+                 rope_freq_scale: float = math.pi,
+                 rope_rotation_augment: bool = True,
                  **kwargs
                  ):
         super().__init__()
@@ -117,6 +132,8 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
         self.api_version = api_version
         self.sep_gene_tokens_neb = sep_gene_tokens_neb
         self.nz_spc = nz_spc
+        self.rope_freq_scale = rope_freq_scale
+        self.rope_rotation_augment = rope_rotation_augment
             
         # Initialize token embeddings
         self.token_embed = nn.Embedding(
@@ -140,6 +157,17 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
                 n_sincos_pos=n_segments + (105 if api_version == 'v1' else 0) + (self.n_special_tokens if self.nz_spc else 0))
             self.seg_embed.weight[1:].copy_(torch.from_numpy(seg_embed).float())
 
+        # Initialize 2D rotary position embedding (shared across blocks)
+        if self.cell_pos_enc == 'rope':
+            head_dim = embed_dim // num_heads
+            self.rope = RoPE2D(
+                head_dim=head_dim,
+                freq_scale=rope_freq_scale,
+                rotation_augment=rope_rotation_augment,
+            )
+        else:
+            self.rope = None
+
         # Initialize encoder blocks and norm layer
         self.blocks = nn.ModuleList([
             Block(dim=embed_dim,
@@ -152,7 +180,8 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
                   attn_drop=attn_drop_rate,
                   norm_layer=norm_layer,
                   use_flash_attention=use_flash_attention,
-                  use_layer_norm=use_layer_norm)
+                  use_layer_norm=use_layer_norm,
+                  rope=self.rope)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
 
@@ -190,6 +219,19 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
+    def _build_coords(self, batch: Mapping[str, torch.Tensor]
+                      ) -> torch.Tensor | None:
+        """
+        Build a (B, N, 2) coordinate tensor from relative x / y coords,
+        used by the RoPE 2D positional embedding. Returns None if the
+        model is not configured to use RoPE, so callers can pass the
+        result through unconditionally.
+        """
+        if self.cell_pos_enc != 'rope':
+            return None
+        return torch.stack(
+            [batch['rel_x_coords'], batch['rel_y_coords']], dim=-1)
+
     def _compute_layer_emb(
             self,
             x: torch.Tensor,
@@ -197,7 +239,9 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
             layers: Sequence[int],
             masks: list[torch.Tensor] | torch.Tensor | None,
             cell_only: bool,
-            ignore_spc_tokens: bool = False) -> dict[int, torch.Tensor]:
+            ignore_spc_tokens: bool = False,
+            coords: torch.Tensor | None = None,
+            ) -> dict[int, torch.Tensor]:
         """
         Helper function to return embeddings for either full context or
         cell only context.
@@ -240,6 +284,8 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
         # Mask token embeddings if masks are provided
         if masks is not None:
             x = apply_masks(x, masks)
+            if coords is not None:
+                coords = apply_masks(coords, masks)
 
         #print("MASKS:")
         #print(masks)
@@ -255,7 +301,7 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
         if DEBUG:
             valid_mask = x.ne(0).any(dim=-1)
         for i, blk in enumerate(self.blocks, start=1):
-            x = blk(x, masks=attn)
+            x = blk(x, masks=attn, coords=coords)
             if i == len(self.blocks) and (self.norm is not None):
                 # Apply norm only for last layer as in training
                 x = self.norm(x)
@@ -292,6 +338,15 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
                 coord=batch['rel_y_coords'])
             seg_emb = torch.cat(
                 [rel_x_coord_emb, rel_y_coord_emb], dim=-1)
+        elif self.cell_pos_enc == 'rope':
+            # RoPE is applied inside Attention directly; the additive
+            # segment embedding is zero so that token + pos + value
+            # contributions are preserved.
+            B, L = batch['tokens'].shape
+            seg_emb = torch.zeros(
+                B, L, self.embed_dim,
+                device=batch['tokens'].device,
+                dtype=self.token_embed.weight.dtype)
         else:
             raise ValueError(
                 f"Unknown cell_pos_enc: {self.cell_pos_enc}.")
@@ -412,13 +467,21 @@ class GeneTransformerBasePredictor(ABC, nn.Module):
         normalization.
     api_version:
         Version of the API to use.
+    rope_freq_scale:
+        Frequency scale for 2D RoPE (only used when
+        `cell_pos_enc == 'rope'`). See
+        `GeneTransformerBaseEncoder` for guidance on choosing this.
+    rope_rotation_augment:
+        If `True`, apply a random per-sample SO(2) rotation to
+        coordinates during training for statistical rotation
+        invariance.
     """
     def __init__(self,
                  embed_dim: int,
                  seq_len: int,
                  n_special_tokens: int,
                  n_segments: int,
-                 cell_pos_enc: Literal['segment', 'coord'],
+                 cell_pos_enc: Literal['segment', 'coord', 'rope'],
                  predictor_embed_dim: int = 768,
                  depth: int = 6,
                  num_heads: int = 12,
@@ -434,6 +497,8 @@ class GeneTransformerBasePredictor(ABC, nn.Module):
                  api_version: Literal['v1', 'v2', 'v3'] = 'v3',
                  nz_spc: bool = False,
                  new_spc: bool = False,
+                 rope_freq_scale: float = math.pi,
+                 rope_rotation_augment: bool = True,
                  **kwargs
                  ):
         super().__init__()
@@ -447,6 +512,8 @@ class GeneTransformerBasePredictor(ABC, nn.Module):
         self.api_version = api_version
         self.nz_spc = nz_spc
         self.new_spc = new_spc
+        self.rope_freq_scale = rope_freq_scale
+        self.rope_rotation_augment = rope_rotation_augment
 
         # Initialize segment embeddings
         if self.cell_pos_enc == 'segment':
@@ -475,6 +542,17 @@ class GeneTransformerBasePredictor(ABC, nn.Module):
         # Initialize mask token embedding for prediction
         self.mask_token = nn.Parameter(torch.zeros(predictor_embed_dim))
 
+        # Initialize 2D rotary position embedding (shared across blocks)
+        if self.cell_pos_enc == 'rope':
+            head_dim = predictor_embed_dim // num_heads
+            self.rope = RoPE2D(
+                head_dim=head_dim,
+                freq_scale=rope_freq_scale,
+                rotation_augment=rope_rotation_augment,
+            )
+        else:
+            self.rope = None
+
         # Initialize predictor blocks, norm layer, and predictor
         # projection layer to project back to encoder embedding size
         self.predictor_blocks = nn.ModuleList([
@@ -487,7 +565,8 @@ class GeneTransformerBasePredictor(ABC, nn.Module):
                   attn_drop=attn_drop_rate,
                   norm_layer=norm_layer,
                   use_flash_attention=use_flash_attention,
-                  use_layer_norm=use_layer_norm)
+                  use_layer_norm=use_layer_norm,
+                  rope=self.rope)
             for i in range(depth)])
         self.predictor_norm = norm_layer(predictor_embed_dim)
         self.predictor_proj = nn.Linear(predictor_embed_dim,
@@ -550,11 +629,58 @@ class GeneTransformerBasePredictor(ABC, nn.Module):
                 coord=batch['rel_y_coords'])
             seg_emb = torch.cat(
                 [rel_x_coord_emb, rel_y_coord_emb], dim=-1)
+        elif self.cell_pos_enc == 'rope':
+            # RoPE is applied inside Attention directly; additive
+            # segment embedding is zero.
+            B, L = batch['tokens'].shape
+            seg_emb = torch.zeros(
+                B, L, self.predictor_embed_dim,
+                device=batch['tokens'].device,
+                dtype=self.predictor_embed.weight.dtype)
         else:
             raise ValueError(
                 f"Unknown cell_pos_enc: {self.cell_pos_enc}.")
 
         return seg_emb
+
+    def _build_coords(self, batch: Mapping[str, torch.Tensor]
+                      ) -> torch.Tensor | None:
+        """
+        Build a (B, N, 2) coordinate tensor used by RoPE. Returns None
+        if the model is not configured to use RoPE.
+        """
+        if self.cell_pos_enc != 'rope':
+            return None
+        return torch.stack(
+            [batch['rel_x_coords'], batch['rel_y_coords']], dim=-1)
+
+    def _compose_predictor_coords(
+            self,
+            coords: torch.Tensor,
+            masks_enc: list[torch.Tensor],
+            masks_pred: list[torch.Tensor],
+            ) -> torch.Tensor:
+        """
+        Mirror the context / target concatenation applied to `z` for the
+        coordinate tensor, so RoPE sees the correct per-token (x, y) of
+        every token fed into the predictor blocks.
+
+        Matches the layout:
+          new_spc=False : [ coords_pred ; coords_ctx_repeated ]
+          new_spc=True  : [ coords_ctx[:, :n_spc] ;
+                            coords_pred[:, n_spc:] ;
+                            coords_ctx[:, n_spc:] ]
+        """
+        coords_ctx = apply_masks(coords, masks_enc)
+        coords_pred = apply_masks(coords, masks_pred)
+        coords_ctx = coords_ctx.repeat(len(masks_pred), 1, 1)
+        if self.new_spc:
+            return torch.cat([
+                coords_ctx[:, :self.n_special_tokens, :],
+                coords_pred[:, self.n_special_tokens:, :],
+                coords_ctx[:, self.n_special_tokens:, :],
+            ], dim=1)
+        return torch.cat([coords_pred, coords_ctx], dim=1)
 
     @abstractmethod
     def forward(self) -> torch.Tensor:
@@ -646,7 +772,8 @@ class GeneTransformerRankEncoder(GeneTransformerBaseEncoder):
             seg_emb = self._get_seg_emb(batch)
 
             token_emb = self.token_embed(batch['tokens'])
-            
+            coords = self._build_coords(batch)
+
             # Add positional and segment embeddings to token embeddings
             x = seg_emb + pos_emb + token_emb
             # B, N, D = x.shape # B: BATCH_SIZE, N: SEQ_LEN,
@@ -655,10 +782,12 @@ class GeneTransformerRankEncoder(GeneTransformerBaseEncoder):
             # Mask token embeddings if masks are provided
             if masks is not None:
                 x = apply_masks(x, masks)
-            
+                if coords is not None:
+                    coords = apply_masks(coords, masks)
+
             # Run forward prop
             for i, blk in enumerate(self.blocks):
-                x = blk(x, masks=masks_attention)
+                x = blk(x, masks=masks_attention, coords=coords)
             if self.norm is not None:
                 x = self.norm(x)
 
@@ -719,6 +848,7 @@ class GeneTransformerRankEncoder(GeneTransformerBaseEncoder):
         token_emb = self.token_embed(batch["tokens"])
         pos_emb = self.pos_embed(batch['positions'])
         seg_emb = self._get_seg_emb(batch)
+        coords = self._build_coords(batch)
 
         # Add segment and positional embeddings to token embeddings
         x = seg_emb + pos_emb + token_emb # [B, L, D]
@@ -734,14 +864,16 @@ class GeneTransformerRankEncoder(GeneTransformerBaseEncoder):
             layers,
             masks,
             cell_only=False,
-            ignore_spc_tokens=ignore_spc_tokens)
+            ignore_spc_tokens=ignore_spc_tokens,
+            coords=coords)
         cell_only_ctx: dict[int, torch.Tensor] = self._compute_layer_emb(
             x,
             masks_attention,
             layers,
             masks,
             cell_only=True,
-            ignore_spc_tokens=ignore_spc_tokens) if need_cell_only_context else None
+            ignore_spc_tokens=ignore_spc_tokens,
+            coords=coords) if need_cell_only_context else None
 
         return full_ctx, cell_only_ctx
 
@@ -845,6 +977,7 @@ class GeneTransformerCountEncoder(GeneTransformerBaseEncoder):
         # Get embeddings for sequence of gene tokens and segments
         seg_emb = self._get_seg_emb(batch)
         token_emb = self.token_embed(batch['tokens'])
+        coords = self._build_coords(batch)
 
         # Get value embeddings
         if self.count_encoding == 'value_bins':
@@ -854,7 +987,7 @@ class GeneTransformerCountEncoder(GeneTransformerBaseEncoder):
             value_emb = value_emb_weights @ self.value_embed.weight
 
             if self.nz_spc:
-                # Assign padding value embedding to 0 counts 
+                # Assign padding value embedding to 0 counts
                 zero_counts_mask = batch['values'] == 0.0
                 zero_value_embed = self.special_value_embed(
                     torch.tensor(0, device=batch['tokens'].device)).to(value_emb.dtype)
@@ -894,10 +1027,12 @@ class GeneTransformerCountEncoder(GeneTransformerBaseEncoder):
         # Mask token embeddings if masks are provided
         if masks is not None:
             x = apply_masks(x, masks)
-        
+            if coords is not None:
+                coords = apply_masks(coords, masks)
+
         # Run forward prop
         for i, blk in enumerate(self.blocks):
-            x = blk(x, masks=masks_attention)
+            x = blk(x, masks=masks_attention, coords=coords)
         if self.norm is not None:
             x = self.norm(x)
 
@@ -958,6 +1093,7 @@ class GeneTransformerCountEncoder(GeneTransformerBaseEncoder):
         # Get embeddings for sequence of gene tokens and segments
         token_emb = self.token_embed(batch['tokens'])
         seg_emb = self._get_seg_emb(batch)
+        coords = self._build_coords(batch)
 
         # Get value embeddings
         if self.count_encoding == 'value_bins':
@@ -1014,14 +1150,16 @@ class GeneTransformerCountEncoder(GeneTransformerBaseEncoder):
             layers,
             masks,
             cell_only=False,
-            ignore_spc_tokens=ignore_spc_tokens)
+            ignore_spc_tokens=ignore_spc_tokens,
+            coords=coords)
         cell_only_ctx: dict[int, torch.Tensor] = self._compute_layer_emb(
             x,
             masks_attention,
             layers,
             masks,
             cell_only=True,
-            ignore_spc_tokens=ignore_spc_tokens) if need_cell_only_context else None
+            ignore_spc_tokens=ignore_spc_tokens,
+            coords=coords) if need_cell_only_context else None
 
         return full_ctx, cell_only_ctx
 
@@ -1149,6 +1287,7 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
         pos_emb = self.pos_embed(batch['positions'])
         seg_emb = self._get_seg_emb(batch)
         token_emb = self.token_embed(batch['tokens'])
+        coords = self._build_coords(batch)
 
         # Get value embeddings
         if self.count_encoding == 'value_bins':
@@ -1158,7 +1297,7 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
             value_emb = value_emb_weights @ self.value_embed.weight
 
             if self.nz_spc:
-                # Assign padding value embedding to 0 counts 
+                # Assign padding value embedding to 0 counts
                 zero_counts_mask = batch['values'] == 0.0
                 zero_value_embed = self.special_value_embed(
                     torch.tensor(0, device=batch['tokens'].device)).to(value_emb.dtype)
@@ -1198,10 +1337,12 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
         # Mask token embeddings if masks are provided
         if masks is not None:
             x = apply_masks(x, masks)
-        
+            if coords is not None:
+                coords = apply_masks(coords, masks)
+
         # Run forward prop
         for i, blk in enumerate(self.blocks):
-            x = blk(x, masks=masks_attention)
+            x = blk(x, masks=masks_attention, coords=coords)
         if self.norm is not None:
             x = self.norm(x)
 
@@ -1264,6 +1405,7 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
         token_emb = self.token_embed(batch['tokens'])
         pos_emb = self.pos_embed(batch['positions'])
         seg_emb = self._get_seg_emb(batch)
+        coords = self._build_coords(batch)
 
         torch.set_printoptions(profile="full")
         #print(batch)
@@ -1343,14 +1485,16 @@ class GeneTransformerCombinedEncoder(GeneTransformerBaseEncoder):
             layers,
             masks,
             cell_only=False,
-            ignore_spc_tokens=ignore_spc_tokens)
+            ignore_spc_tokens=ignore_spc_tokens,
+            coords=coords)
         cell_only_ctx: dict[int, torch.Tensor] = self._compute_layer_emb(
             x,
             masks_attention,
             layers,
             masks,
             cell_only=True,
-            ignore_spc_tokens=ignore_spc_tokens) if need_cell_only_context else None
+            ignore_spc_tokens=ignore_spc_tokens,
+            coords=coords) if need_cell_only_context else None
 
         return full_ctx, cell_only_ctx
 
@@ -1447,6 +1591,7 @@ class GeneTransformerRankPredictor(GeneTransformerBasePredictor):
             # Get positional and segment embeddings
             pos_embed = self.pos_embed(batch['positions'])
             seg_embed = self._get_seg_emb(batch)
+            coords_full = self._build_coords(batch)
 
             # Add positional embeddings to tokens from context masks
             # (only keep context mask indices and sum positional and
@@ -1469,7 +1614,7 @@ class GeneTransformerRankPredictor(GeneTransformerBasePredictor):
                 pos_embs.size(1), # TARGET_MASK_SIZE
                 1)
 
-            # Add positional and segment embeddings to mask tokens                  
+            # Add positional and segment embeddings to mask tokens
             pred_tokens += pos_embs + seg_embs
 
             # Repeat context embeddings for all target masks
@@ -1490,9 +1635,16 @@ class GeneTransformerRankPredictor(GeneTransformerBasePredictor):
                     #z[:, self.n_special_tokens:, :] # context gene tokens (excl. special tokens)
                     ], dim=1)
 
+            # Assemble per-token coordinates that mirror z's layout,
+            # so RoPE sees the right (x, y) for every predictor token.
+            coords = None
+            if coords_full is not None:
+                coords = self._compose_predictor_coords(
+                    coords_full, masks_enc, masks_pred)
+
             # Run forward prop
             for blk in self.predictor_blocks:
-                z = blk(z, masks=masks_attention)
+                z = blk(z, masks=masks_attention, coords=coords)
             z = self.predictor_norm(z)
 
             # Return predictions for (target) mask tokens
@@ -1575,6 +1727,7 @@ class GeneTransformerCountPredictor(GeneTransformerBasePredictor):
         # Get gene and segment embeddings
         token_embed = self.token_embed_projection(token_emb)
         seg_embed = self._get_seg_emb(batch)
+        coords_full = self._build_coords(batch)
 
         # Add positional embeddings to tokens from context masks (only
         # keep context mask indices and sum positional and segment
@@ -1597,7 +1750,7 @@ class GeneTransformerCountPredictor(GeneTransformerBasePredictor):
             seg_embs.size(1), # TARGET_MASK_SIZE
             1)
 
-        # Add gene and segment embeddings to mask tokens                  
+        # Add gene and segment embeddings to mask tokens
         pred_tokens += token_embs + seg_embs
 
         # Repeat context embeddings for all target masks
@@ -1618,9 +1771,15 @@ class GeneTransformerCountPredictor(GeneTransformerBasePredictor):
                 #z[:, self.n_special_tokens:, :] # context gene tokens (excl. special tokens)
                 ], dim=1)
 
+        # Assemble per-token coordinates matching z's layout.
+        coords = None
+        if coords_full is not None:
+            coords = self._compose_predictor_coords(
+                coords_full, masks_enc, masks_pred)
+
         # Run forward prop
         for blk in self.predictor_blocks:
-            z = blk(z, masks=masks_attention)
+            z = blk(z, masks=masks_attention, coords=coords)
         z = self.predictor_norm(z)
 
         # Return predictions for (target) mask tokens
@@ -1740,6 +1899,7 @@ class GeneTransformerCombinedPredictor(GeneTransformerBasePredictor):
 
         # Get segment embeddings
         seg_embed = self._get_seg_emb(batch)
+        coords_full = self._build_coords(batch)
 
         # Add positional or gene embeddings to tokens from context masks (only
         # keep context mask indices and sum positional or gene and segment
@@ -1792,9 +1952,15 @@ class GeneTransformerCombinedPredictor(GeneTransformerBasePredictor):
                 #z[:, self.n_special_tokens:, :] # context gene tokens (excl. special tokens)
                 ], dim=1)
 
+        # Assemble per-token coordinates matching z's layout.
+        coords = None
+        if coords_full is not None:
+            coords = self._compose_predictor_coords(
+                coords_full, masks_enc, masks_pred)
+
         # Run forward prop
         for blk in self.predictor_blocks:
-            z = blk(z, masks=masks_attention)
+            z = blk(z, masks=masks_attention, coords=coords)
         z = self.predictor_norm(z)
 
         # Return predictions for (target) mask tokens

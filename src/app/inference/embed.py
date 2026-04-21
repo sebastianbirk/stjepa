@@ -1,5 +1,6 @@
 import copy
 import logging
+import math
 import os
 import pickle
 import sys
@@ -171,7 +172,12 @@ def embed_dataset(dataset: Dataset,
         predict_gene=model_config['meta']['predict_gene'],
         pos_learnable=model_config['meta']['pos_learnable'],
         nz_spc=model_config['data'].get('nz_spc', False),
-        mlp_bias=model_config['meta'].get('mlp_bias', True))
+        mlp_bias=model_config['meta'].get('mlp_bias', True),
+        rope_freq_scale=model_config['meta'].get('rope_freq_scale', math.pi),
+        # Force off at inference for deterministic embeddings. RoPE2D also
+        # gates this on self.training, so .eval() already prevents random
+        # rotations; the explicit False is belt-and-suspenders.
+        rope_rotation_augment=False)
 
     if model_config['meta']['api_version'] != 'v3':
         return_layer_emb_fn = target_encoder.return_layer_emb
@@ -694,7 +700,12 @@ def gene_embed_dataset(dataset: Dataset,
         predict_gene=model_config['meta']['predict_gene'],
         pos_learnable=model_config['meta']['pos_learnable'],
         nz_spc=model_config['data'].get('nz_spc', False),
-        mlp_bias=model_config['meta'].get('mlp_bias', True)
+        mlp_bias=model_config['meta'].get('mlp_bias', True),
+        rope_freq_scale=model_config['meta'].get('rope_freq_scale', math.pi),
+        # Force off at inference for deterministic embeddings. RoPE2D also
+        # gates this on self.training, so .eval() already prevents random
+        # rotations; the explicit False is belt-and-suspenders.
+        rope_rotation_augment=False
         )
 
     if model_config['meta']['api_version'] != 'v3':

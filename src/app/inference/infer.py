@@ -1,5 +1,6 @@
 import copy
 import logging
+import math
 import os
 import pickle
 import sys
@@ -183,6 +184,14 @@ def infer(args: dict,
         mlp_bias = args['meta']['mlp_bias']
     else:
         mlp_bias = True
+    if 'rope_freq_scale' in args['meta'].keys():
+        rope_freq_scale = args['meta']['rope_freq_scale']
+    else:
+        rope_freq_scale = math.pi
+    if 'rope_rotation_augment' in args['meta'].keys():
+        rope_rotation_augment = args['meta']['rope_rotation_augment']
+    else:
+        rope_rotation_augment = False
 
     dataset_name = args['data']['dataset_name']
     token_dict_folder_path = args['data']['token_dict_folder_path']
@@ -308,7 +317,12 @@ def infer(args: dict,
         predict_gene=predict_gene,
         pos_learnable=pos_learnable,
         nz_spc=nz_spc,
-        mlp_bias=mlp_bias)
+        mlp_bias=mlp_bias,
+        rope_freq_scale=rope_freq_scale,
+        # Force off at inference for deterministic embeddings. RoPE2D also
+        # gates this on self.training, so .eval() already prevents random
+        # rotations; the explicit False is belt-and-suspenders.
+        rope_rotation_augment=False)
 
     if api_version != 'v3':
         return_layer_emb_fn = target_encoder.return_layer_emb
