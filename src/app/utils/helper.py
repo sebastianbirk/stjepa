@@ -7,6 +7,7 @@ https://github.com/facebookresearch/ijepa/blob/main/src/helper.py
 """
 
 import logging
+import math
 import sys
 from typing import Literal
 
@@ -152,14 +153,14 @@ def load_checkpoint(device: str,
 def init_model(gt_type: Literal['rank', 'count', 'combined'],
                count_encoding: Literal['value_bins', 'mlp'],
                n_value_bins: int,
-               cell_pos_enc: Literal['segment', 'coord'],
+               cell_pos_enc: Literal['segment', 'coord', 'rope'],
                device: str,
                vocab_size: int,
                seq_len: int,
                n_special_tokens: int,
                n_segments: int,
                n_special_values: int | None = None,
-               enc_emb_dim: int = 768, 
+               enc_emb_dim: int = 768,
                enc_depth: int = 12,
                pred_emb_dim: int = 384,
                pred_depth: int = 6,
@@ -174,6 +175,8 @@ def init_model(gt_type: Literal['rank', 'count', 'combined'],
                nz_spc: bool = False,
                new_spc: bool = False,
                mlp_bias: bool = False,
+               rope_freq_scale: float = math.pi,
+               rope_rotation_augment: bool = True,
                ) -> tuple[gt.GeneTransformerBaseEncoder,
                           gt.GeneTransformerBasePredictor]:
     """
@@ -218,6 +221,19 @@ def init_model(gt_type: Literal['rank', 'count', 'combined'],
     predict_gene:
         If `True`, predict gene given rank, otherwise predict rank given
         gene.
+    rope_freq_scale:
+        Global frequency scale for 2D RoPE (only used when
+        `cell_pos_enc == 'rope'`). The default `math.pi` assumes
+        per-token coordinates roughly in `[-1, 1]`. For coordinates
+        in `[-R, R]` with `R >> 1` (e.g. microns), pass a smaller
+        value such as `math.pi / R` to keep the slowest rotation
+        period below the domain size and avoid aliasing.
+    rope_rotation_augment:
+        If `True`, apply a random SO(2) rotation to per-token
+        coordinates on each forward pass during training (RoPE mode
+        only). This exploits the translation-invariance of RoPE to
+        add cheap rotation augmentation without touching the input
+        tensors.
 
     Returns
     -----------
@@ -246,7 +262,9 @@ def init_model(gt_type: Literal['rank', 'count', 'combined'],
         sep_gene_tokens_neb=sep_gene_tokens_neb,
         pos_learnable=pos_learnable,
         nz_spc=nz_spc,
-        mlp_bias=mlp_bias)
+        mlp_bias=mlp_bias,
+        rope_freq_scale=rope_freq_scale,
+        rope_rotation_augment=rope_rotation_augment)
     if api_version == 'v3' or api_version == 'v4':
         encoder = EncoderMultiMaskWrapper(encoder)
     predictor = gt.__dict__["init_gt_predictor"](
@@ -267,7 +285,9 @@ def init_model(gt_type: Literal['rank', 'count', 'combined'],
         predict_gene=predict_gene,
         pos_learnable=pos_learnable,
         nz_spc=nz_spc,
-        new_spc=new_spc)
+        new_spc=new_spc,
+        rope_freq_scale=rope_freq_scale,
+        rope_rotation_augment=rope_rotation_augment)
     if api_version == 'v3' or api_version == 'v4':
         predictor = PredictorMultiMaskWrapper(predictor)
 
