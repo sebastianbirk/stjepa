@@ -98,7 +98,7 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
                  seq_len: int,
                  n_special_tokens: int,
                  n_segments: int,
-                 cell_pos_enc: Literal['segment', 'coord', 'rope'],
+                 cell_pos_enc: Literal['segment', 'coord', 'rope', 'none'],
                  embed_dim: int = 768,
                  depth: int = 12,
                  predictor_embed_dim: int = 384,
@@ -347,6 +347,15 @@ class GeneTransformerBaseEncoder(ABC, nn.Module):
                 B, L, self.embed_dim,
                 device=batch['tokens'].device,
                 dtype=self.token_embed.weight.dtype)
+        elif self.cell_pos_enc == 'none':
+            # No cell positional encoding at all (ablation): return a
+            # zero additive embedding so that only token + value
+            # contributions enter the transformer.
+            B, L = batch['tokens'].shape
+            seg_emb = torch.zeros(
+                B, L, self.embed_dim,
+                device=batch['tokens'].device,
+                dtype=self.token_embed.weight.dtype)
         else:
             raise ValueError(
                 f"Unknown cell_pos_enc: {self.cell_pos_enc}.")
@@ -481,7 +490,7 @@ class GeneTransformerBasePredictor(ABC, nn.Module):
                  seq_len: int,
                  n_special_tokens: int,
                  n_segments: int,
-                 cell_pos_enc: Literal['segment', 'coord', 'rope'],
+                 cell_pos_enc: Literal['segment', 'coord', 'rope', 'none'],
                  predictor_embed_dim: int = 768,
                  depth: int = 6,
                  num_heads: int = 12,
@@ -631,6 +640,14 @@ class GeneTransformerBasePredictor(ABC, nn.Module):
                 [rel_x_coord_emb, rel_y_coord_emb], dim=-1)
         elif self.cell_pos_enc == 'rope':
             # RoPE is applied inside Attention directly; additive
+            # segment embedding is zero.
+            B, L = batch['tokens'].shape
+            seg_emb = torch.zeros(
+                B, L, self.predictor_embed_dim,
+                device=batch['tokens'].device,
+                dtype=self.predictor_embed.weight.dtype)
+        elif self.cell_pos_enc == 'none':
+            # No cell positional encoding at all (ablation): additive
             # segment embedding is zero.
             B, L = batch['tokens'].shape
             seg_emb = torch.zeros(

@@ -5,8 +5,8 @@ job_requirement:
   LSB_DEFAULT_USERGROUP: team361  # The user group to be used for scheduling the job.
   QUEUE: "training-parallel"  # The job queue to be used for scheduling the job.
   NUM_NODES: 1  # Number of compute nodes required for the job.
-  NUM_GPUS_NODE: 8 # 8  # 8 Number of GPUs per node.
-  NUM_PROCESSES_NODE: 64 # 64  # 64 Number of processes per node.
+  NUM_GPUS_NODE: 4 # 8  # 8 Number of GPUs per node.
+  NUM_PROCESSES_NODE: 32 # 64  # 64 Number of processes per node.
   MEM_NODE: 64 # 64  # 64 Memory allocated per node (in GB).
 
 infiniband:
@@ -21,7 +21,7 @@ artifact:
   OUTPUT_DIR: "/nfs/team361/sb75/stjepa-reproducibility/artifacts/mmb0-1b_smb1-1b_2p"  # Path to store the artifacts.
   LOG_DIR: "/nfs/team361/sb75/stjepa-reproducibility/artifacts/mmb0-1b_smb1-1b_2p"
   EXPERIMENT_NAME: "stjepa_v2_mmb0-1b_smb1-1b_2p"  # Name of the experiment.
-  RUN_NAME: "run5_rope_unit_disk_norm"  # Name of the run.
+  RUN_NAME: "run8_no_cell_pos_enc"  # Name of the run.
 
 runner_script:
   RUNNER_SCRIPT: "/nfs/team361/sb75/stjepa/src/app/training/train_model_lsf_mpirun_sanger.sh"  # Path to the runnaazazer script.

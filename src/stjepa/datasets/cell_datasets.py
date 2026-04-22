@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 class CellBaseDataset(Dataset):
     def __init__(self,
                  gt_type: Literal['rank', 'counts', 'combined'],
-                 cell_pos_enc: Literal['segment', 'coord', 'rope'],
+                 cell_pos_enc: Literal['segment', 'coord', 'rope', 'none'],
                  dataset: datasets.Dataset,
                  vocab_size: int,
                  seq_len_cell: int,
@@ -59,7 +59,7 @@ class CellBaseDataset(Dataset):
         """
         if gt_type not in ['rank', 'counts', 'combined']:
             raise ValueError(f'Invalid "gt_type": {gt_type}.')
-        if cell_pos_enc not in ['segment', 'coord', 'rope']:
+        if cell_pos_enc not in ['segment', 'coord', 'rope', 'none']:
             raise ValueError(f'Invalid "cell_pos_enc": {cell_pos_enc}.')
         if rope_coord_normalization not in (
                 'none', 'per_sample_unit_disk'):

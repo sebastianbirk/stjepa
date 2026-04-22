@@ -153,7 +153,7 @@ def load_checkpoint(device: str,
 def init_model(gt_type: Literal['rank', 'count', 'combined'],
                count_encoding: Literal['value_bins', 'mlp'],
                n_value_bins: int,
-               cell_pos_enc: Literal['segment', 'coord', 'rope'],
+               cell_pos_enc: Literal['segment', 'coord', 'rope', 'none'],
                device: str,
                vocab_size: int,
                seq_len: int,
@@ -191,7 +191,12 @@ def init_model(gt_type: Literal['rank', 'count', 'combined'],
     n_value_bins:
         Number of value bins if `value_bin` count encoding is used.
     cell_pos_enc:
-        How cell positions are encoded.
+        How cell positions are encoded. One of 'segment' (learned /
+        sincos segment ids), 'coord' (additive 2D sincos from relative
+        x/y coords), 'rope' (2D rotary position embedding applied
+        inside attention), or 'none' (no cell positional encoding at
+        all — ablation; only gene-token + position embeddings are
+        used).
     device:
         Device on which the model will be initialized.
     vocab_size:

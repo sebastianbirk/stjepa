@@ -61,7 +61,8 @@ def prepare_dataset(args: dict, train_mode: bool = False):
         'assay_value_token','species_value_token','tissue_value_token',
         'cls_tokens','cell_total_counts','cell_n_probed_genes'
     ]
-    if 'cell_pos_enc' not in args['meta'] or args['meta']['cell_pos_enc'] == 'segment':
+    if ('cell_pos_enc' not in args['meta']
+            or args['meta']['cell_pos_enc'] in ('segment', 'none')):
         fields_to_remove += ['rel_x_coord','rel_y_coord']
 
     existing = [c for c in fields_to_remove if c in ds.column_names]
