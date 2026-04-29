@@ -8,7 +8,7 @@ data:
   count_cell_norm_method: null
   count_gene_norm_method: null
   count_count_norm_method: null
-  raw_data_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/silver/mmb0-1b_smb1-1b_2p'
+  raw_data_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/silver/mmb0-1b_smb1-1b_2p_coord_aligned'
   token_dict_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/tokenizer/token_dictionary_mus_musculus.pkl'
   tokenized_data_folder_path: '/lustre/scratch126/cellgen/lotfollahi/DATASETS/gold/cell-graph-tokenizer/mmb0-1b_smb1-1b_2p_coord_aligned/mmb0-1b_smb1-1b_2p_coord_aligned_32_None_None_None_None_None_None_knn_10_704.dataset'
   precomputed_split: null

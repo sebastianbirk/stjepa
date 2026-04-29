@@ -40,7 +40,7 @@ meta:
   gt_type: 'combined' # 'rank', 'counts', 'combined'
   count_encoding: 'mlp' # 'value_bins', 'mlp'
   n_value_bins: 20
-  cell_pos_enc: none # 'segment', 'rope', none
+  cell_pos_enc: 'segment' # 'segment', 'rope', none
   enc_depth: 3
   enc_emb_dim: 768
   pred_depth: 1

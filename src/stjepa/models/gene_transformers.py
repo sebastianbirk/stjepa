@@ -871,9 +871,9 @@ class GeneTransformerRankEncoder(GeneTransformerBaseEncoder):
         x = seg_emb + pos_emb + token_emb # [B, L, D]
 
         # Remove special token contents
-        if ignore_spc_tokens:
-            if self.n_special_tokens:
-                x[:, :self.n_special_tokens, :] = 0
+        #if ignore_spc_tokens:
+        #    if self.n_special_tokens:
+        #        x[:, :self.n_special_tokens, :] = 0
 
         full_ctx: dict[int, torch.Tensor] = self._compute_layer_emb(
             x,
